@@ -1,0 +1,145 @@
+AIM:
+Short Drama, using text + image + video model, through the workflow, to achieve a short drama of no less than 3 minutes, 720p, with story, character consistency, explaining the Prompt structure and the overall workflow process
+
+NOTE:
+note that I have cloned SPEC here, it acts as our api model calls at remote (hx1) via ssh. See its api documentations, and what should be done at the frontend.
+at the remote server I did start the server so it should works. I cloned it here just for you to view the endpoints conveniently.
+(but may still need to run ssh -L ... check that)
+However as the first step of testing, simply mock the endpoint.
+then try with my ssh remote
+once all working
+tell me, I will add real api endpoint from official qwen
+then we shall consider deployment
+
+CONTEXT:
+Test - AI Agent Project Intern (BytePlus) - 2026 - London
+
+
+Summarize
+Tala Mahmoud<tala.mahmoud@bytedance.com>
+
+
+
+You don't often get email from tala.mahmoud@bytedance.com. Learn why this is important
+
+
+External email: This message came from outside Imperial. Do not click links or open attachments unless you recognise the sender and were expecting this email.
+
+
+Hello,
+
+Thanks for submitting your application to ByteDance Early Careers positions for 2026!
+
+My name is Tala and I'm a Global Talent Acquisition Partner at ByteDance. I'll be your recruiter supporting your application and interview process for this role.
+
+Congratulations on progressing to the first stage of the recruitment process for this role. I’m pleased to invite you to a complete a test for the AI Agent Project Internship with our team in London. This step is crucial to move forward in the overall assessment process.
+
+ Please provide the demonstration site by Friday 13th March, midnight (UK Time).
+
+
+
+Important Details
+
+Simply select one of the questions to proceed with.
+Social Data Analysis, using Agent Browse capabilities, to achieve TikTok the latest, hottest information acquisition, and summarize, optimize Prompt, and generate.
+E-commerce scenario application, AI Coding to achieve Fashion website, with specific products, beautiful and creative scenario, able to upload personal photos + product images, to achieve virtual dressing
+Short Drama, using text + image + video model, through the workflow, to achieve a short drama of no less than 3 minutes, 720p, with story, character consistency, explaining the Prompt structure and the overall workflow process
+Enterprise scenario application, Go to Market research, input the topic, Agent independently completes the analysis and data correction, and analysis reports. It can import certain industry data and reports, and complete them through RAG and AI search
+Financial Data Analysis, regularly extracting and summarizing public data sources and social media information, analyzing future trends in the stock market, Bitcoin, gold, etc
+
+Use Openclaw + Claude Code (non-Claude code model) + Skill + Multi-Agent working simultaneously + Engineering means (no coding tool restrictions, and AIGC tools, such as Capcut, etc.), and deploy the results on the public network, try to use [http://javascript:void(0)]Byteplus.com services.
+
+
+Good luck!
+
+
+Warm Regards,
+Tala
+ByteDance Early Careers Team
+
+
+Follow us on ByteDance Careers | LinkedIn
+
+We value your privacy. Please consult our Applicant Privacy policy here about how we collect, use and transfer your sensitive data.
+
+Ren, Zhibo
+
+​Tala Mahmoud <tala.mahmoud@bytedance.com>​
+Hi Tala,
+Thank you for the opportunity to complete the test task for the AI Agent Project Internship. I’m looking forward to working on it.
+I had a quick clarification regarding the submission requirements. When you mention deploying the results on the public network, should the demo site contain a fully functional online system, or would a public webpage demonstrating the workflow (with generated outputs and a demo video) also be acceptable?
+Thank you
+Zhibo (Robin)
+Tala Mahmoud<tala.mahmoud@bytedance.com>
+
+​
+Ren, Zhibo​
+
+
+You don't often get email from tala.mahmoud@bytedance.com. Learn why this is important
+
+
+External email: This message came from outside Imperial. Do not click links or open attachments unless you recognise the sender and were expecting this email.
+
+Hi Zhibo,
+
+Thanks for getting in touch.
+
+I've asked the team and sharing their response here: "website /app, at least the pdp page within a button upload selfie and generate the character with the product. Backend is a workflow".
+
+Hope this answers your question!
+
+Warm regards,
+Tala
+
+Ren, Zhibo
+
+​Tala Mahmoud <tala.mahmoud@bytedance.com>​
+Hi Tala
+
+I understand the deadline is 13th March midnight, however I am extremely busy with exams until 20th March, so currently cannot find spare time to do the test.
+
+I wonder if it's possible to extend the deadline to after that?
+
+Thank you
+Robin
+Tala Mahmoud<tala.mahmoud@bytedance.com>
+
+​
+Ren, Zhibo​
+CAUTION: This message came from outside Imperial. Do not click links or open attachments unless you recognise the sender and were expecting this email.
+
+Hi Robin,
+
+Hope all's well on your end!
+
+Sure, I'll inform the team that you need some extra time.
+
+Best regards,
+Tala 
+
+Ren, Zhibo
+
+​Tala Mahmoud <tala.mahmoud@bytedance.com>​
+Hi Tala
+
+I will starting to work on it today and will submit within the next few days.
+
+However, I wonder if there are still places left?
+
+Thank you
+Robin
+Tala Mahmoud<tala.mahmoud@bytedance.com>
+
+​
+Ren, Zhibo​
+
+
+CAUTION: This message came from outside Imperial. Do not click links or open attachments unless you recognise the sender and were expecting this email.
+
+Hi Robin,
+
+We are currently in the process of moving the pipeline at several stages, and I'll explain to the team that your situation. In the meantime please complete the assignment and please let me know when you'll be able to submit.
+
+Warm regards,
+Tala
