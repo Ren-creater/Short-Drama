@@ -1,0 +1,14 @@
+{
+  "name": "short-drama-workflow-studio",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production-ready short drama workflow demo using DashScope official APIs and a Node proxy.",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "smoke": "node run_pipeline.js"
+  }
+}
