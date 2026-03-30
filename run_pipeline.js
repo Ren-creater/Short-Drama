@@ -24,25 +24,33 @@ function loadDotEnv() {
 
 loadDotEnv();
 
-const BASE_URL = (process.env.DASHSCOPE_BASE_URL || "https://dashscope-intl.aliyuncs.com/api/v1").replace(/\/+$/, "");
+const RAW_BASE_URL = (process.env.DASHSCOPE_BASE_URL || "https://dashscope-intl.aliyuncs.com").replace(/\/+$/, "");
+const BASE_URL = /\/api\/v1$/i.test(RAW_BASE_URL) ? RAW_BASE_URL : `${RAW_BASE_URL}/api/v1`;
 const API_KEY = (process.env.DASHSCOPE_API_KEY || "").trim();
-const TTS_MODEL = (process.env.TTS_MODEL || "qwen3-tts-flash").trim();
 const IMAGE_MODEL = (process.env.IMAGE_MODEL || "qwen-image").trim();
-const VIDEO_MODEL = (process.env.VIDEO_MODEL || "wan2.1-i2v-plus").trim();
+const VIDEO_MODEL = (process.env.VIDEO_MODEL || "wan2.6-i2v").trim();
+const VIDEO_DURATION_SECONDS = Math.max(5, Number(process.env.VIDEO_DURATION_SECONDS || 15) || 15);
 
 if (!API_KEY) {
   console.error("Missing DASHSCOPE_API_KEY");
   process.exit(1);
 }
 
+function shouldUseAsync(pathname) {
+  return pathname.includes("/text2image/") || pathname.includes("/video-generation/");
+}
+
 async function request(pathname, payload) {
+  const headers = {
+    "Content-Type": "application/json",
+    "Authorization": `Bearer ${API_KEY}`
+  };
+  if (shouldUseAsync(pathname)) {
+    headers["X-DashScope-Async"] = "enable";
+  }
   const resp = await fetch(`${BASE_URL}${pathname}`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": `Bearer ${API_KEY}`,
-      "X-DashScope-Async": "enable"
-    },
+    headers,
     body: JSON.stringify(payload),
   });
   const text = await resp.text();
@@ -57,8 +65,7 @@ async function poll(taskId, label, timeoutMs = 1800000) {
   while (Date.now() - start < timeoutMs) {
     const resp = await fetch(`${BASE_URL}/tasks/${taskId}`, {
       headers: {
-        "Authorization": `Bearer ${API_KEY}`,
-        "X-DashScope-Async": "enable"
+        "Authorization": `Bearer ${API_KEY}`
       }
     });
     const data = await resp.json();
@@ -71,30 +78,6 @@ async function poll(taskId, label, timeoutMs = 1800000) {
 }
 
 async function main() {
-  console.log("TTS submit...");
-  const ttsPayload = {
-    model: TTS_MODEL,
-    input: {
-      text: "The backup lights died one by one. Mira heard the call before she trusted it. You still listen to the silence, Elias said, and the ward breathed again."
-    },
-    parameters: {
-      voice: "Cherry",
-      language_type: "English",
-      format: "wav",
-      stream: false
-    }
-  };
-  const ttsResp = await request("/services/aigc/multimodal-generation/generation", ttsPayload);
-  let audioUrl = ttsResp?.output?.task_result?.audio_url;
-  if (!audioUrl) {
-    const ttsTask = ttsResp?.output?.task_id || ttsResp?.request_id;
-    if (!ttsTask) throw new Error("No TTS task id");
-    const ttsStatus = await poll(ttsTask, "TTS");
-    audioUrl = ttsStatus?.output?.task_result?.audio_url;
-  }
-  if (!audioUrl) throw new Error("TTS audio_url missing");
-  console.log("Audio URL:", audioUrl);
-
   console.log("Text2Image submit...");
   const t2iPayload = {
     model: IMAGE_MODEL,
@@ -114,19 +97,24 @@ async function main() {
     model: VIDEO_MODEL,
     input: {
       img_url: imageUrl,
-      prompt: "Cinematic shot continuation from the reference frame, grounded motion, stable character identity, 720p"
+      prompt: "Cinematic shot continuation from the reference frame, grounded motion, stable character identity, 720p. Native audio direction: hospital room tone, rain on glass, distant alarms, rolling cart wheels, urgent footsteps. Keep sound realistic and synchronized, no voice-over, no music."
     },
-    parameters: { resolution: "720P", duration: 5, prompt_extend: false, watermark: false }
+    parameters: { resolution: "720P", duration: VIDEO_DURATION_SECONDS, prompt_extend: false, watermark: false, audio: true }
   };
   const vidResp = await request("/services/aigc/video-generation/video-synthesis", vidPayload);
   const vidTask = vidResp?.output?.task_id || vidResp?.request_id;
   if (!vidTask) throw new Error("No Image2Video task id");
   const vidStatus = await poll(vidTask, "Image2Video", 3600000);
-  const videoUrl = vidStatus?.output?.results?.video_url;
+  const videoUrl = vidStatus?.output?.video_url || vidStatus?.output?.results?.video_url;
   if (!videoUrl) throw new Error("Video URL missing");
   console.log("Video URL:", videoUrl);
 
-  const premade = { image: imageUrl, video: videoUrl };
+  const premade = {
+    title: "Short Drama Example Output",
+    brief: "A junior emergency doctor discovers the anonymous caller guiding her through a citywide blackout is her estranged brother.",
+    image: imageUrl,
+    video: videoUrl
+  };
   fs.writeFileSync("premade.json", JSON.stringify(premade, null, 2));
   console.log("Saved premade.json");
 }

@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Short Drama Workflow Studio</title>
+  <title>Short Drama Studio</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
@@ -14,9 +14,9 @@
     <header class="hero">
       <div>
         <p class="eyebrow">Text + Image + Video Workflow</p>
-        <h1>Short Drama Workflow Studio</h1>
+        <h1>Short Drama Studio</h1>
         <p class="hero-copy">
-          Enter one short‑drama brief. The workflow handles story structure, characters, keyframes, TTS narration, and video synthesis.
+          Enter one short‑drama brief. The workflow handles story structure, character consistency, keyframes, and native-audio video synthesis.
         </p>
       </div>
       <div class="hero-card">
@@ -43,22 +43,30 @@
 
         <label>
           Short Drama Brief
-          <textarea id="brief" rows="6">A junior emergency doctor discovers the anonymous caller guiding her through a citywide blackout is her estranged brother. She must trust him to keep the neonatal ward alive before sunrise.</textarea>
+          <textarea id="brief" rows="6">A bear and a dog become unlikely friends after surviving a storm together.</textarea>
         </label>
+
+        <input id="runMode" type="hidden" value="production">
 
         <div class="grid two-up">
           <label>
-            Runtime (fixed)
+            Mode
+            <input type="text" value="Production · 180s" readonly>
+          </label>
+          <label>
+            Runtime
             <input id="runtime" type="number" value="180" readonly>
           </label>
+        </div>
+
+        <div class="grid two-up">
           <label>
             Resolution
             <input id="resolution" type="text" value="1280x720" readonly>
           </label>
         </div>
 
-        <button id="runWorkflow" class="primary-btn" type="button">Run Workflow</button>
-        <p class="hint">Official image and video generation runs as async tasks. Keep the page open while the workflow submits, polls, and assembles the final cut.</p>
+        <button id="runWorkflow" class="primary-btn" type="button">Generate Short Drama</button>
         <div class="live-box">
           <h3>Live Progress</h3>
           <ul id="liveLog" class="live-log"></ul>
@@ -90,11 +98,10 @@
               <video id="finalVideoPlayer" controls playsinline></video>
               <div class="shot-links">
                 <a id="finalVideoDownload" href="#" download="video.mp4">Download final video</a>
-                <a id="finalAudioDownload" href="#" download="audio.wav">Download narration audio</a>
               </div>
             </div>
           </div>
-          <button id="saveExampleOutput" class="secondary-btn" type="button" style="display:none;">Use This Run As Example Output</button>
+          <button id="saveExampleOutput" class="secondary-btn" type="button" style="display:none;">Save As Example Output</button>
         </div>
 
         <div class="pipeline" id="pipeline"></div>
@@ -102,7 +109,7 @@
 
         <div class="diagram-card">
           <h3>Workflow Diagram</h3>
-          <p class="hint">Pipeline logic: one brief enters once, then story planning feeds scene narration and keyframes; finished keyframes move into a bounded video queue before final assembly.</p>
+          <p class="hint">Pipeline logic: one brief enters once, then story planning feeds sound-aware prompts and keyframes; finished keyframes move into a bounded video queue before final assembly.</p>
           <svg viewBox="0 0 980 340" class="flow-diagram" role="img" aria-label="Short drama workflow map">
             <defs>
               <linearGradient id="flow" x1="0" x2="1">
@@ -133,8 +140,8 @@
             <text x="572" y="104" text-anchor="middle" font-size="13" fill="#5d5247">image/video prompts</text>
 
             <rect x="702" y="58" width="220" height="70" rx="14" fill="#fff" stroke="#bf4f2d" stroke-width="2"/>
-            <text x="812" y="84" text-anchor="middle" font-size="15" fill="#171411">TTS Narration</text>
-            <text x="812" y="104" text-anchor="middle" font-size="13" fill="#5d5247">scene-level narration</text>
+            <text x="812" y="84" text-anchor="middle" font-size="15" fill="#171411">Sound-Aware Prompting</text>
+            <text x="812" y="104" text-anchor="middle" font-size="13" fill="#5d5247">diegetic audio guidance</text>
 
             <rect x="80" y="210" width="220" height="72" rx="14" fill="#fff" stroke="#bf4f2d" stroke-width="2"/>
             <text x="190" y="238" text-anchor="middle" font-size="15" fill="#171411">Text-to-Image</text>
@@ -142,26 +149,20 @@
 
             <rect x="360" y="210" width="240" height="72" rx="14" fill="#fff" stroke="#bf4f2d" stroke-width="2"/>
             <text x="480" y="238" text-anchor="middle" font-size="15" fill="#171411">Image-to-Video</text>
-            <text x="480" y="258" text-anchor="middle" font-size="13" fill="#5d5247">queued official API jobs</text>
+            <text x="480" y="258" text-anchor="middle" font-size="13" fill="#5d5247">queued native-audio API jobs</text>
 
             <rect x="660" y="210" width="240" height="72" rx="14" fill="#fff" stroke="#bf4f2d" stroke-width="2"/>
             <text x="780" y="238" text-anchor="middle" font-size="15" fill="#171411">Final Deliverable</text>
-            <text x="780" y="258" text-anchor="middle" font-size="13" fill="#5d5247">mux, normalize, concat</text>
+            <text x="780" y="258" text-anchor="middle" font-size="13" fill="#5d5247">normalize, concat, deliver</text>
 
             <path d="M222 93 L262 93" stroke="url(#flow)" stroke-width="3" marker-end="url(#arrow)"/>
             <path d="M442 93 L482 93" stroke="url(#flow)" stroke-width="3" marker-end="url(#arrow)"/>
             <path d="M352 128 L352 168 L190 168 L190 210" stroke="url(#flow)" stroke-width="3" fill="none" marker-end="url(#arrow)"/>
-            <path d="M352 93 L702 93" stroke="url(#flowSoft)" stroke-width="2.5" stroke-dasharray="8 7" fill="none" marker-end="url(#arrow)"/>
+            <path d="M662 93 L702 93" stroke="url(#flowSoft)" stroke-width="2.5" stroke-dasharray="8 7" fill="none" marker-end="url(#arrow)"/>
             <path d="M812 128 L812 168 L780 168 L780 210" stroke="url(#flowSoft)" stroke-width="2.5" stroke-dasharray="8 7" fill="none" marker-end="url(#arrow)"/>
             <path d="M300 246 L360 246" stroke="url(#flow)" stroke-width="3" marker-end="url(#arrow)"/>
             <path d="M600 246 L660 246" stroke="url(#flow)" stroke-width="3" marker-end="url(#arrow)"/>
           </svg>
-        </div>
-
-        <div class="diagram-card">
-          <h3>Prompt Structure</h3>
-          <p class="hint">Each scene prompt follows the same template to keep character identity, wardrobe, props, and camera style consistent across all clips.</p>
-          <div id="promptStructure" class="prose-block"></div>
         </div>
 
       </section>
@@ -190,24 +191,19 @@
             <h3>Final Output</h3>
             <div class="showcase-grid">
               <div class="showcase-item">
-                <span>Stitched Final Video (includes audio)</span>
-                <video id="demoFinalVideo" controls playsinline></video>
-                <div class="shot-links">
-                  <a id="demoFinalVideoDownload" href="#" download="video.mp4">Download final video</a>
-                  <a id="demoFinalAudioDownload" href="#" download="audio.wav">Download narration audio</a>
-                </div>
+              <span>Stitched Final Video (includes audio)</span>
+              <video id="demoFinalVideo" controls playsinline></video>
+              <div class="shot-links">
+                <a id="demoFinalVideoDownload" href="#" download="video.mp4">Download final video</a>
               </div>
             </div>
+          </div>
           </div>
 
           <div class="mode-box" id="demoBrief"></div>
           <div id="demoPipeline" class="pipeline"></div>
           <div id="demoShotPlan" class="shot-plan"></div>
 
-          <div class="diagram-card">
-            <h3>Prompt Structure</h3>
-            <div id="demoPromptStructure" class="prose-block"></div>
-          </div>
         </div>
       </section>
     </main>

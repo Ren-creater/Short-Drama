@@ -1,8 +1,8 @@
-﻿const pipelineDefinitions = [
+const pipelineDefinitions = [
   {
     id: "story",
     label: "Story",
-    detail: "Expand the brief into a complete dramatic arc."
+    detail: "Expand the brief into a full runtime-matched shot list."
   },
   {
     id: "bible",
@@ -12,17 +12,17 @@
   {
     id: "keyframes",
     label: "Keyframes",
-    detail: "Generate one continuity-safe keyframe per scene."
+    detail: "Generate one continuity-safe keyframe per shot."
   },
   {
     id: "clips",
     label: "Video",
-    detail: "Generate one clip per scene using DashScope 720P."
+    detail: "Generate one 15-second native-audio clip per shot using DashScope 720P."
   },
   {
     id: "assembly",
     label: "Assembly",
-    detail: "Stitch clips into a fixed 180s, 720p deliverable."
+    detail: "Normalize and stitch native-audio clips into one final 720p deliverable."
   }
 ];
 
@@ -30,6 +30,8 @@ const state = {
   result: null,
   upstreamBaseUrl: "",
   runtimeConfig: null,
+  runToken: "",
+  runGuard: null,
   progress: { done: 0, total: 1 },
   workflowRunning: false,
   transportCooldownUntil: 0,
@@ -39,6 +41,7 @@ const state = {
 const els = {
   brief: document.getElementById("brief"),
   runWorkflow: document.getElementById("runWorkflow"),
+  runMode: document.getElementById("runMode"),
   workflowTab: document.getElementById("workflowTab"),
   showcaseTab: document.getElementById("showcaseTab"),
   workflowView: document.getElementById("workflowView"),
@@ -48,10 +51,10 @@ const els = {
   statusBanner: document.getElementById("statusBanner"),
   promptStructure: document.getElementById("promptStructure"),
   runtimeMetric: document.getElementById("runtimeMetric"),
+  runtime: document.getElementById("runtime"),
   finalOutputPanel: document.getElementById("finalOutputPanel"),
   finalVideoPlayer: document.getElementById("finalVideoPlayer"),
   finalVideoDownload: document.getElementById("finalVideoDownload"),
-  finalAudioDownload: document.getElementById("finalAudioDownload"),
   saveExampleOutput: document.getElementById("saveExampleOutput"),
   demoEmpty: document.getElementById("demoEmpty"),
   demoContent: document.getElementById("demoContent"),
@@ -63,8 +66,6 @@ const els = {
   demoFinalOutputPanel: document.getElementById("demoFinalOutputPanel"),
   demoFinalVideo: document.getElementById("demoFinalVideo"),
   demoFinalVideoDownload: document.getElementById("demoFinalVideoDownload"),
-  demoFinalAudioDownload: document.getElementById("demoFinalAudioDownload"),
-  demoNarrationAudio: document.getElementById("demoNarrationAudio"),
   demoImage: document.getElementById("demoImage"),
   demoPipeline: document.getElementById("demoPipeline"),
   demoShotPlan: document.getElementById("demoShotPlan"),
@@ -80,24 +81,83 @@ const EXAMPLE_OUTPUT_PATH = "/example-output.json";
 const KEYFRAME_SUBMIT_CONCURRENCY = 1;
 const KEYFRAME_SUBMIT_RETRIES = 4;
 const VIDEO_ACTIVE_TASK_LIMIT = 2;
-const SCENE_TTS_CONCURRENCY = 2;
 const VIDEO_TASK_TIMEOUT_MS = 43200000;
 const MEDIA_FETCH_RETRIES = 3;
 const VIDEO_SUBMIT_RETRIES = 4;
+
+function getRunProfile(modeValue) {
+  const clipDuration = getClipDurationSeconds();
+  const normalized = String(modeValue || "production").toLowerCase();
+  if (normalized === "planner") {
+    return {
+      id: "planner-production",
+      runtime: 180,
+      shotCountOverride: 0,
+      plannerOnly: true,
+      label: "Planner-only production - 180s",
+      detail: "Run the full production planner path without calling image/video APIs."
+    };
+  }
+  if (normalized === "plannerpreview") {
+    const runtime = Math.max(30, clipDuration * 2);
+    return {
+      id: "planner-preview",
+      runtime,
+      shotCountOverride: Math.max(2, Math.ceil(runtime / clipDuration)),
+      plannerOnly: true,
+      label: `Planner-only preview - ${runtime}s`,
+      detail: "Build story plan, prompts, and shot cards without calling image/video APIs."
+    };
+  }
+  if (normalized === "oneshot") {
+    return {
+      id: "oneshot",
+      runtime: clipDuration,
+      shotCountOverride: 1,
+      plannerOnly: false,
+      label: `One-shot validation - ${clipDuration}s`,
+      detail: "Call the real image/video pipeline for a single shot only."
+    };
+  }
+  if (normalized === "60" || normalized === "30" || normalized === "180") {
+    const runtime = Math.max(30, Number(normalized) || 180);
+    return {
+      id: runtime === 180 ? "production" : `legacy-${runtime}`,
+      runtime,
+      shotCountOverride: 0,
+      plannerOnly: false,
+      label: runtime === 180 ? "3-minute 720p short drama" : `${runtime}s validation run at 720p`,
+      detail: runtime === 180 ? "Full production run." : "Legacy validation mode."
+    };
+  }
+  return {
+    id: "production",
+    runtime: 180,
+    shotCountOverride: 0,
+    plannerOnly: false,
+    label: "3-minute 720p short drama",
+    detail: "Full production run."
+  };
+}
+
+function getRequestedShotCount(payload) {
+  const override = Number(payload?.shotCountOverride || 0) || 0;
+  if (override > 0) return override;
+  return getShotCountForRuntime(payload?.runtime);
+}
 
 function defaultRuntimeConfig() {
   return {
     mode: "official-api",
     dashscope_endpoint: "",
-    image_model: "qwen-image",
-    tts_model: "qwen3-tts-flash",
+    image_model: "qwen-image-plus",
+    image_model_sequence: [
+      "qwen-image-plus",
+      "qwen-image"
+    ],
     video_resolution: "720P",
-    video_duration_seconds: 5,
+    video_duration_seconds: 15,
     video_model_sequence: [
-      "wan2.1-i2v-plus",
-      "wan2.1-i2v-turbo",
-      "wan2.2-i2v-flash",
-      "wan2.5-i2v-preview",
       "wan2.6-i2v",
       "wan2.6-i2v-flash"
     ],
@@ -107,6 +167,20 @@ function defaultRuntimeConfig() {
 
 function getRuntimeConfig() {
   return state.runtimeConfig || defaultRuntimeConfig();
+}
+
+function isExampleCaptureEnabled() {
+  return Boolean(getRuntimeConfig().enable_example_capture);
+}
+
+function getClipDurationSeconds() {
+  const runtimeConfig = getRuntimeConfig();
+  return Math.max(5, Number(runtimeConfig.video_duration_seconds || 15) || 15);
+}
+
+function getShotCountForRuntime(runtimeSeconds) {
+  const clipDuration = getClipDurationSeconds();
+  return Math.max(1, Math.ceil((Number(runtimeSeconds) || 180) / clipDuration));
 }
 
 function renderPipelineInto(target, activeId = null, doneIds = []) {
@@ -138,12 +212,6 @@ function updateStatusBanner(kind, text) {
 function setStatus(kind, text) {
   updateStatusBanner(kind, text);
   appendLiveLog(text, kind);
-}
-
-function setTtsStatus(text, kind = "idle") {
-  // TTS status panel removed from UI; keep this as a no-op hook.
-  void text;
-  void kind;
 }
 
 function appendLiveLog(message, kind = "idle") {
@@ -242,39 +310,50 @@ function createLimiter(concurrency) {
 }
 
 function deriveFromBrief(brief) {
-  const safeBrief = brief || "Short drama about urgent trust during a crisis.";
-  const title = safeBrief.split(".")[0].trim().slice(0, 48) || "Short Drama";
-  const logline = safeBrief.length > 180 ? safeBrief.slice(0, 180) + "..." : safeBrief;
-  const genre = /thriller|suspense|blackout|crisis|escape/i.test(safeBrief) ? "Emotional thriller" : "Character drama";
-  const tone = /hope|reconcile|forgive|family/i.test(safeBrief) ? "Intimate, hopeful" : "Urgent, cinematic";
-  const protagonist = "Dr. Mira Chen, 29, East Asian woman, sharp bob haircut, tired observant eyes, navy ER scrubs under a dark raincoat, silver analog watch.";
-  const secondary = "Elias Chen, 34, East Asian man, lean build, hooded charcoal jacket, worn messenger bag, controlled voice, carries guilt, same eyes as Mira.";
-  const visualWorld = "Rain-slick night, emergency lighting, reflective glass, handheld tension, cyan and amber palette.";
-  const narration = `${title}. ${logline}`;
-
+  const safeBrief = brief || "";
   return {
-    title,
-    logline,
-    genre,
-    tone,
-    protagonist,
-    secondary,
-    visualWorld,
-    narration
+    title: "",
+    logline: "",
+    genre: "",
+    tone: "",
+    protagonist: "",
+    secondary: "",
+    visualWorld: ""
+  };
+}
+
+function mergeStoryIntoPayload(payload, story) {
+  const mergedStory = story && typeof story === "object" ? story : {};
+  return {
+    ...payload,
+    title: String(mergedStory.title || payload.title || payload.brief || "Short Drama").trim(),
+    logline: String(mergedStory.logline || payload.logline || payload.brief || "").trim(),
+    genre: String(mergedStory.genre || payload.genre || "").trim(),
+    tone: String(mergedStory.tone || payload.tone || "").trim(),
+    protagonist: String(mergedStory.primary || payload.protagonist || "").trim(),
+    secondary: String(mergedStory.secondary || payload.secondary || "").trim(),
+    visualWorld: String(mergedStory.visualWorld || payload.visualWorld || "").trim()
   };
 }
 
 function inputPayload() {
-  els.runtimeMetric.textContent = "3-minute 720p short drama";
+  const profile = getRunProfile(els.runMode?.value);
+  const runtime = profile.runtime;
+  els.runtimeMetric.textContent = profile.label;
+  if (els.runtime) {
+    els.runtime.value = String(runtime);
+  }
   const brief = els.brief.value.trim();
   const derived = deriveFromBrief(brief);
 
   return {
     brief,
     ...derived,
-    runtime: 180,
-    resolution: "1280x720",
-    audioUrl: ""
+    runtime,
+    shotCountOverride: profile.shotCountOverride,
+    plannerOnly: profile.plannerOnly,
+    runProfile: profile.id,
+    resolution: "1280x720"
   };
 }
 
@@ -283,173 +362,279 @@ function buildScenes(payload) {
 }
 
 function defaultBeats(payload) {
-  return [
+  const count = getRequestedShotCount(payload);
+  const phases = [
     {
-      title: "Blackout Trigger",
-      purpose: "Launch the crisis and isolate the protagonist.",
-      summary: `${payload.brief} The hospital plunges into backup power as Mira gets the first call.`,
-      location: "Hospital corridor",
-      camera: "handheld push-in",
-      emotion: "suppressed panic"
+      title: "Opening Image",
+      purpose: "Establish the initial situation.",
+      summary: "Introduce the core visual situation implied by the brief and define the first stable image of the story world.",
+      location: "Initial setting",
+      camera: "establishing push-in",
+      emotion: "emergent tension"
     },
     {
-      title: "Voice in the Dark",
-      purpose: "Reveal the anonymous guide is personal, not random.",
-      summary: "The caller predicts the next failure. Mira recognizes the voice as Elias.",
-      location: "Stairwell landing",
-      camera: "tight medium close-up",
-      emotion: "shock under control"
+      title: "First Shift",
+      purpose: "Introduce the first meaningful change.",
+      summary: "A visible shift in action, scale, energy, or context turns the initial setup into a story beat with consequences.",
+      location: "Changed setting",
+      camera: "tight reactive framing",
+      emotion: "uneasy momentum"
     },
     {
-      title: "Broken Trust",
-      purpose: "Place emotional history against the operational crisis.",
-      summary: "Elias admits he has tracked the sabotage for months. Mira refuses to trust him without proof.",
-      location: "Split between hospital and parked van",
-      camera: "cross-cutting with slow lateral drift",
-      emotion: "resentment colliding with necessity"
+      title: "Complication",
+      purpose: "Introduce resistance or instability.",
+      summary: "Something in the moment becomes more difficult, contradictory, unstable, or emotionally charged, raising pressure on the scene.",
+      location: "Pressure zone",
+      camera: "lateral drift with interruptive cuts",
+      emotion: "rising strain"
     },
     {
-      title: "First Switch",
-      purpose: "Deliver the first tactical win while increasing pressure.",
-      summary: "Mira restores one backup line but locks down the pediatric lift. A second relay is deeper below.",
-      location: "Utility room",
-      camera: "low-angle close action shots",
-      emotion: "determined strain"
+      title: "Escalation",
+      purpose: "Push the visual idea into a stronger state.",
+      summary: "The central visual idea intensifies through stronger motion, clearer stakes, or a more dramatic transformation of the situation.",
+      location: "Escalation space",
+      camera: "close action fragments",
+      emotion: "driven intensity"
     },
     {
-      title: "Storm Crossing",
-      purpose: "Move both characters toward collision.",
-      summary: "Elias crosses the flooded street with stolen access cards as Mira races the failing tannoy.",
-      location: "Exterior street and service tunnel",
-      camera: "tracking with lens flares in rain",
-      emotion: "forward momentum"
+      title: "Turning Point",
+      purpose: "Reveal the decisive turn in the short arc.",
+      summary: "A decisive visual moment changes how the viewer understands the situation and redirects the scene toward resolution.",
+      location: "Turning point",
+      camera: "tracking reveal",
+      emotion: "sharp reversal"
     },
     {
-      title: "Confession at the Relay",
-      purpose: "Pay off the family fracture.",
-      summary: "At the second relay, Elias admits why he disappeared. Mira confronts his guilt.",
-      location: "Basement relay chamber",
-      camera: "two-shot turning into over-the-shoulder reverses",
-      emotion: "raw honesty"
+      title: "Consequence",
+      purpose: "Show the impact of the turn.",
+      summary: "The aftermath of the turning point plays out in concrete visual terms, clarifying what has changed in the world of the story.",
+      location: "Consequence space",
+      camera: "measured reaction framing",
+      emotion: "charged clarity"
     },
     {
-      title: "Power Return",
-      purpose: "Resolve the practical objective.",
-      summary: "They reset the main bypass together. The neonatal ward powers back up seconds before failure.",
-      location: "Relay chamber to neonatal ward",
-      camera: "crescendo montage with stabilizing frames",
+      title: "Resolution",
+      purpose: "Deliver the visual payoff.",
+      summary: "The sequence resolves into its clearest and most satisfying visual state, answering the dramatic movement established earlier.",
+      location: "Resolution setting",
+      camera: "stabilizing crescendo",
       emotion: "earned release"
     },
     {
-      title: "Dawn Answer",
-      purpose: "End on emotional resolution, not just restored electricity.",
-      summary: "At dawn, Mira finally asks why Elias called her. He says she was the only one who would answer.",
-      location: "Hospital roof at first light",
+      title: "Afterglow",
+      purpose: "End on the final image.",
+      summary: "The final beat holds on the changed state of the story world and leaves a clear closing image for the short.",
+      location: "Aftermath setting",
       camera: "wide shot resolving into still portrait",
-      emotion: "quiet reconciliation"
+      emotion: "quiet resolution"
     }
   ];
+
+  return Array.from({ length: count }, (_, index) => {
+    const phase = phases[Math.min(phases.length - 1, Math.floor((index / count) * phases.length))];
+    return {
+      ...phase,
+      title: `${phase.title} ${index + 1}`,
+      summary: `${phase.summary} This beat covers shot ${index + 1} of ${count}.`,
+    };
+  });
 }
 
 function sanitizeBeat(beat, index) {
   const idx = index + 1;
+  const cleanPlannerField = (value, fallback) => {
+    let text = String(value || fallback || "").replace(/\s+/g, " ").trim();
+    if (!text) return String(fallback || "");
+    const letsUseMatches = [...text.matchAll(/let'?s use\s+"([^"]{1,120})"/gi)];
+    if (letsUseMatches.length) {
+      text = letsUseMatches[letsUseMatches.length - 1][1];
+    }
+    text = text
+      .replace(/^[\s"'`]+|[\s"'`]+$/g, "")
+      .replace(/^max\s+\d+\s+words?\s*[-:]\s*/gi, "")
+      .replace(/^max\s+\d+\s+words?\s*/gi, "")
+      .replace(/^ok\s*[-:.]?\s*/gi, "")
+      .replace(/^\s*good\.\s*/gi, "")
+      .replace(/\s*\(\d+\s+words?\)[^.,;:!?)]*/gi, "")
+      .replace(/\s*-\s*max\s+\d+\s+words?[^.,;:!?)]*/gi, "")
+      .replace(/\s*-\s*wait\s+max\s+\d+\s+words?[^.,;:!?)]*/gi, "")
+      .replace(/\s*-\s*ok\b[^.,;:!?)]*/gi, "")
+      .replace(/\s*-\s*good\.?/gi, "")
+      .replace(/\s*good\.\s*/gi, " ")
+      .replace(/\s*or\s+"[^"]{1,120}"/gi, "")
+      .replace(/^[^"]{0,40}"([^"]{1,120})"[^"]*$/i, "$1")
+      .replace(/\s*or\s+[^.;:!?]{1,120}$/i, "")
+      .replace(/^[^:]+:\s*/i, (match) => /^(scene|shot)\s+\d+\s*:/i.test(match) ? match : "")
+      .replace(/[)"'`]+$/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+    text = text.replace(/^[\s"'`]+|[\s"'`]+$/g, "").trim();
+    if (/^(string|number|boolean|array|object|null|undefined|n\/a|na|\.\.\.)$/i.test(text)) {
+      return String(fallback || "");
+    }
+    if (/^(interi|exteri|locat|camer|purpos|emotio)$/i.test(text)) {
+      return String(fallback || "");
+    }
+    return text || String(fallback || "");
+  };
+  const sharedPrompt = cleanPlannerField(beat?.prompt, "");
+  const title = cleanPlannerField(beat?.title, sharedPrompt ? "" : `Scene ${idx}`);
+  const titleLooksGeneric = /^beat\s+\d+$/i.test(title) || /^scene\s+\d+$/i.test(title);
+  const purpose = cleanPlannerField(beat?.purpose, sharedPrompt ? "" : "Advance the dramatic arc.");
+  let summary = cleanPlannerField(beat?.summary || sharedPrompt, "");
+  const location = cleanPlannerField(beat?.location, sharedPrompt ? "" : "Story setting");
+  const camera = cleanPlannerField(beat?.camera, sharedPrompt ? "" : "cinematic framing");
+  const emotion = cleanPlannerField(beat?.emotion, sharedPrompt ? "" : "rising tension");
+  if (summary.length < 24 || /\b(reason|because|until|that|with|while|through|across|toward|into|shows?)\s*[a-z]{0,2}$/i.test(summary)) {
+    const repaired = [sharedPrompt, purpose, location && location !== "Story setting" ? `in ${location}` : "", emotion && emotion !== "rising tension" ? `with ${emotion}` : ""]
+      .filter(Boolean)
+      .join(" ");
+    summary = repaired || "A decisive moment advances the story in a visually coherent way.";
+  }
   return {
-    title: String(beat?.title || `Scene ${idx}`),
-    purpose: String(beat?.purpose || "Advance the dramatic arc."),
-    summary: String(beat?.summary || "Continue the story progression with continuity-safe character actions."),
-    location: String(beat?.location || "Primary story location"),
-    camera: String(beat?.camera || "cinematic medium shot"),
-    emotion: String(beat?.emotion || "rising tension")
+    title: titleLooksGeneric ? (purpose || `Scene ${idx}`) : (title || `Scene ${idx}`),
+    purpose,
+    summary,
+    location,
+    camera,
+    emotion,
+    audio: cleanPlannerField(beat?.audio, ""),
+    prompt: sharedPrompt
   };
 }
 
+
 async function requestLlmSceneBeats(payload) {
+  const shotCount = getRequestedShotCount(payload);
   const response = await fetchJson("/api/local/story-plan", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       brief: payload.brief,
-      title: payload.title,
-      logline: payload.logline,
-      genre: payload.genre,
-      tone: payload.tone,
-      protagonist: payload.protagonist,
-      secondary: payload.secondary,
-      visualWorld: payload.visualWorld,
       runtime: payload.runtime,
-      scene_count: 8
+      scene_count: shotCount
     })
   });
-  const scenes = Array.isArray(response?.scenes) ? response.scenes.slice(0, 8).map(sanitizeBeat) : [];
-  if (scenes.length < 8) {
+  const scenes = Array.isArray(response?.scenes) ? response.scenes.slice(0, shotCount).map(sanitizeBeat) : [];
+  if (scenes.length < shotCount) {
     throw new Error("Kimi returned insufficient scene beats");
   }
-  return { scenes, model: response?.model || "" };
+  return { scenes, story: response?.story || null, model: response?.model || "" };
 }
 
 function buildScenesFromBeats(payload, beats) {
-  const durations = [22, 22, 22, 22, 23, 23, 23, 23];
+  const shotCount = Math.max(1, beats.length || getRequestedShotCount(payload));
+  const baseDuration = Math.floor(payload.runtime / shotCount);
+  const remainder = payload.runtime % shotCount;
   let total = 0;
   return beats.map((beat, index) => {
     const safeBeat = sanitizeBeat(beat, index);
-    const duration = durations[index];
+    const duration = baseDuration + (index < remainder ? 1 : 0);
     total += duration;
-    return {
+    const sceneBeat = {
       ...safeBeat,
+      duration
+    };
+    return {
+      ...sceneBeat,
       sceneNumber: index + 1,
       duration,
       cumulative: total,
-      keyframePrompt: buildKeyframePrompt(payload, safeBeat, index + 1),
-      videoPrompt: buildVideoPrompt(payload, safeBeat, index + 1),
-      narrationText: buildSceneNarration(payload, safeBeat, index + 1),
+      keyframePrompt: buildKeyframePrompt(payload, sceneBeat, index + 1),
+      videoPrompt: buildVideoPrompt(payload, sceneBeat, index + 1),
       keyframeStatus: "pending",
       videoStatus: "pending",
-      audioStatus: "pending",
-      audioUrl: "",
       videoModel: ""
     };
   });
 }
 
-function buildSceneNarration(payload, beat, sceneNumber) {
-  return [
-    `Scene ${sceneNumber}, ${beat.title}.`,
-    beat.summary,
-    `The scene unfolds in ${beat.location.toLowerCase()}, framed with ${beat.camera}.`,
-    `Emotionally, it plays with ${beat.emotion}, while the dramatic purpose is to ${beat.purpose.toLowerCase()}.`,
-    `This moment pushes ${payload.protagonist.split(",")[0]} deeper into the crisis and keeps the story moving toward the final resolution.`
-  ].join(" ");
+function truncateWords(text, maxWords) {
+  const words = String(text || "").trim().split(/\s+/).filter(Boolean);
+  if (words.length <= maxWords) return words.join(" ");
+  return `${words.slice(0, maxWords).join(" ")}...`;
+}
+
+function buildNativeAudioDirection(beat, sceneNumber) {
+  const audio = String(beat?.audio || "").trim();
+  const direction = audio
+    ? audio
+    : "Use only scene-appropriate diegetic audio inferred by the video model itself, with no extra assumptions from the client.";
+  return `Native audio direction for shot ${sceneNumber}: ${direction} Keep sound realistic and synchronized to motion. Avoid voice-over, exact scripted dialogue requirements, dialogue subtitles, or unrelated effects.`;
+}
+
+function hasMeaningfulBeatValue(value, fallback = "") {
+  const text = String(value || "").trim();
+  return Boolean(text && text !== String(fallback || "").trim());
+}
+
+function isGenericSceneTitle(scene) {
+  const title = String(scene?.title || "").trim();
+  if (!title) return true;
+  return /^scene\s+\d+$/i.test(title) || /^beat\s+\d+$/i.test(title) || /^shot\s+\d+$/i.test(title);
+}
+
+function getSceneDisplayLabel(scene) {
+  const shotLabel = `Shot ${scene.sceneNumber}`;
+  return isGenericSceneTitle(scene)
+    ? shotLabel
+    : `Scene ${scene.sceneNumber}: ${scene.title}`;
+}
+
+function getSceneTimelineEntry(scene) {
+  return isGenericSceneTitle(scene)
+    ? `${scene.sceneNumber}. Shot ${scene.sceneNumber}: ${scene.duration}s`
+    : `${scene.sceneNumber}. ${scene.title}: ${scene.duration}s`;
 }
 
 function buildKeyframePrompt(payload, beat, sceneNumber) {
-  return [
-    `Scene ${sceneNumber} keyframe for "${payload.title}".`,
-    `Brief: ${payload.brief}`,
-    `Character anchor: ${payload.protagonist}`,
-    `Secondary anchor: ${payload.secondary}`,
-    `World style: ${payload.visualWorld}`,
-    `Scene action: ${beat.summary}`,
-    `Camera: ${beat.camera}.`,
-    `Lighting and palette: moody cinematic realism, controlled contrast, amber emergency lights against cyan rain reflections.`,
-    `Consistency rules: preserve facial identity, hair silhouette, wardrobe colors, silver watch on Mira, charcoal jacket and messenger bag on Elias, no age drift, no costume drift.`
-  ].join(" ");
+  const scenePrompt = String(beat?.prompt || "").trim();
+  const lines = [
+    `Scene ${sceneNumber} keyframe for "${payload.title || payload.brief || "Short Drama"}".`,
+    `Brief: ${payload.brief}`
+  ];
+  if (payload.visualWorld) lines.push(`World style: ${payload.visualWorld}`);
+  if (payload.protagonist) lines.push(`Character anchor: ${payload.protagonist}`);
+  if (payload.secondary) lines.push(`Secondary anchor: ${payload.secondary}`);
+  lines.push(
+    scenePrompt ? `Shared scene prompt: ${scenePrompt}` : `Scene action: ${beat.summary}`,
+    ...(!scenePrompt && hasMeaningfulBeatValue(beat.camera, "cinematic framing") ? [`Camera: ${beat.camera}.`] : []),
+    `Lighting and palette: cinematic realism with coherent contrast, location-appropriate color, and continuity across the full short.`,
+    `Consistency rules: preserve the core visual identity, scale logic, defining forms, and recurring elements across shots; avoid random replacement, contradictory details, or continuity drift.`
+  );
+  return lines.join(" ");
 }
 
 function buildVideoPrompt(payload, beat, sceneNumber) {
-  return [
-    `Generate a 720p cinematic video clip for scene ${sceneNumber} of "${payload.title}".`,
-    `Start from the approved keyframe image and keep both characters on-model.`,
-    `Performance beat: ${beat.emotion}.`,
-    `Action beat: ${beat.summary}`,
-    `Shot design: ${beat.camera}, natural motion blur, grounded handheld realism, no surreal transitions.`,
-    `Pacing direction: movement and camera timing should support a ${beat.duration}-second clip with clean entry/exit frames for later narration mix.`,
-    `Safety constraints: stable anatomy, stable wardrobe, same props, no sudden background swaps, no subtitle burn-in, no extra characters.`
-  ].join(" ");
+  const scenePrompt = String(beat?.prompt || "").trim();
+  const parts = [
+    `Generate a 720p cinematic video clip for scene ${sceneNumber} of "${payload.title || payload.brief || "Short Drama"}".`,
+    `Start from the approved keyframe image and preserve its core visual elements and continuity.`
+  ];
+  if (scenePrompt) {
+    parts.push(
+      `Shared scene prompt: ${scenePrompt}`,
+      `Motion direction: preserve the action, framing, and continuity implied by the shared scene prompt with natural motion blur and coherent movement.`
+    );
+  } else {
+    parts.push(
+      `Performance beat: ${beat.emotion}.`,
+      `Action beat: ${beat.summary}`,
+      `Shot design: ${beat.camera}, natural motion blur, coherent motion language, and visually continuous action.`
+    );
+  }
+  parts.push(
+    `Pacing direction: movement and camera timing should support a ${beat.duration}-second clip with clean entry and exit frames for concat.`,
+    buildNativeAudioDirection(beat, sceneNumber),
+    `Safety constraints: stable forms, stable recurring elements, no sudden background swaps, no subtitle burn-in, and no unrelated intrusions.`
+  );
+  return parts.join(" ");
 }
 
 function buildPromptStructure(payload, scenes, bible) {
   const runtimeConfig = getRuntimeConfig();
-  const primaryVideoModel = runtimeConfig.video_model_sequence?.[0] || "wan2.1-i2v-plus";
+  const primaryVideoModel = runtimeConfig.video_model_sequence?.[0] || "wan2.6-i2v";
+  const usesSharedScenePrompts = Array.isArray(scenes) && scenes.some((scene) => String(scene?.prompt || "").trim());
   const systemPrompt = [
     "You are a short-drama workflow planner for text, image, and video generation.",
     "Produce outputs that are cinematic, emotionally coherent, and practical for downstream media models.",
@@ -459,62 +644,71 @@ function buildPromptStructure(payload, scenes, bible) {
 
   const storyPrompt = [
     `BRIEF: ${payload.brief}`,
-    `TITLE: ${payload.title}`,
-    `LOGLINE: ${payload.logline}`,
-    `GENRE: ${payload.genre}`,
-    `TONE: ${payload.tone}`,
+    payload.title ? `TITLE: ${payload.title}` : "",
+    payload.logline ? `LOGLINE: ${payload.logline}` : "",
+    payload.genre ? `GENRE: ${payload.genre}` : "",
+    payload.tone ? `TONE: ${payload.tone}` : "",
     `TARGET_RUNTIME_SECONDS: ${payload.runtime}`,
-    `PRIMARY_CHARACTER: ${payload.protagonist}`,
-    `SECONDARY_CHARACTER: ${payload.secondary}`,
-    `VISUAL_WORLD: ${payload.visualWorld}`,
-    "TASK: Write an eight-scene short-drama outline with escalating stakes, emotional reversals, and a final visual resolution.",
-    "OUTPUT FORMAT: JSON with scenes, each scene including purpose, duration_seconds, summary, camera, emotion, and continuity notes."
-  ].join("\n");
+    payload.protagonist ? `PRIMARY_CHARACTER: ${payload.protagonist}` : "",
+    payload.secondary ? `SECONDARY_CHARACTER: ${payload.secondary}` : "",
+    payload.visualWorld ? `VISUAL_WORLD: ${payload.visualWorld}` : "",
+    "TASK: Write a shot-by-shot short-drama outline with escalating stakes, emotional reversals, and a final visual resolution.",
+    usesSharedScenePrompts
+      ? "OUTPUT FORMAT: JSON with story package plus scenes, each scene including prompt and audio only."
+      : "OUTPUT FORMAT: JSON with shots, each item including purpose, summary, camera, emotion, and continuity notes."
+  ].filter(Boolean).join("\n");
 
-  const imagePromptTemplate = [
-    "[BRIEF]",
-    "[SUBJECT_IDENTITY]",
-    "[WARDROBE_AND_PROPS]",
-    "[LOCATION_AND_TIME]",
-    "[DRAMATIC_ACTION]",
-    "[CAMERA_AND_COMPOSITION]",
-    "[LIGHTING_AND_COLOR]",
-    "[CONSISTENCY_RULES]",
-    "[NEGATIVE_CONSTRAINTS: no age drift, no extra fingers, no costume swap, no text overlays]"
-  ].join("\n");
+  const imagePromptTemplate = usesSharedScenePrompts
+    ? [
+        "[BRIEF]",
+        "[STORY_ANCHORS_AND_WORLD_STYLE]",
+        "[SHARED_SCENE_PROMPT]",
+        "[LIGHTING_AND_COLOR]",
+        "[CONSISTENCY_RULES]",
+        "[NEGATIVE_CONSTRAINTS: no contradictory details, no random replacement, no text overlays]"
+      ].join("\n")
+    : [
+        "[BRIEF]",
+        "[CORE_VISUAL_IDENTITY_OR_FORM]",
+        "[RECURRING_ELEMENTS_AND_PROPS]",
+        "[LOCATION_AND_TIME]",
+        "[DRAMATIC_ACTION]",
+        "[CAMERA_AND_COMPOSITION]",
+        "[LIGHTING_AND_COLOR]",
+        "[CONSISTENCY_RULES]",
+        "[NEGATIVE_CONSTRAINTS: no contradictory details, no random replacement, no text overlays]"
+      ].join("\n");
 
-  const videoPromptTemplate = [
-    "[APPROVED_KEYFRAME_REFERENCE]",
-    "[VIDEO_PROMPT_TEXT]",
-    "[CHARACTER_PERFORMANCE_BEAT]",
-    "[MOTION_DIRECTION_AND_CAMERA_MOVE]",
-    "[PACING_FOR_LATER_NARRATION_MIX]",
-    "[ENVIRONMENT_CONTINUITY]",
-    "[DURATION_AND_RESOLUTION_TARGET]",
-    "[FAILURE_AVOIDANCE: stable anatomy, stable props, avoid sudden shot morphs]"
-  ].join("\n");
+  const videoPromptTemplate = usesSharedScenePrompts
+    ? [
+        "[APPROVED_KEYFRAME_REFERENCE]",
+        "[SHARED_SCENE_PROMPT]",
+        "[NATIVE_AUDIO_DIRECTION: diegetic ambience and effects only]",
+        "[ENVIRONMENT_CONTINUITY]",
+        "[DURATION_AND_RESOLUTION_TARGET]",
+        "[FAILURE_AVOIDANCE: preserve key visual forms and recurring elements, avoid sudden morphs or unrelated insertions]"
+      ].join("\n")
+    : [
+        "[APPROVED_KEYFRAME_REFERENCE]",
+        "[VIDEO_PROMPT_TEXT]",
+        "[CHARACTER_PERFORMANCE_BEAT]",
+        "[MOTION_DIRECTION_AND_CAMERA_MOVE]",
+        "[NATIVE_AUDIO_DIRECTION: diegetic ambience and effects, with optional short natural speech if the shot clearly implies it, no exact scripted dialogue]",
+        "[ENVIRONMENT_CONTINUITY]",
+        "[DURATION_AND_RESOLUTION_TARGET]",
+        "[FAILURE_AVOIDANCE: preserve key visual forms and recurring elements, avoid sudden morphs or unrelated insertions]"
+      ].join("\n");
 
   const continuity = [
     `Primary anchor summary: ${bible.protagonist.anchors.join('; ')}.`,
-    `Secondary anchor summary: ${bible.secondary.anchors.join('; ')}.`,
+    bible.secondary.identity ? `Secondary anchor summary: ${bible.secondary.anchors.join('; ')}.` : "",
     `World anchors: ${bible.worldAnchors.join('; ')}.`,
-    "Operational rule: each scene gets one hero keyframe, and its video job launches as soon as that keyframe is ready.",
-    "If a character changes pose or wardrobe across scenes, issue an image-edit correction pass before launching the corresponding video clip."
-  ].join("\n");
-
-  const ttsPayloadExample = JSON.stringify({
-    model: runtimeConfig.tts_model,
-    input: { text: scenes[0].narrationText },
-    parameters: {
-      voice: "Cherry",
-      language_type: "English",
-      format: "wav",
-      stream: false
-    }
-  }, null, 2);
+    "Operational rule: each shot gets one hero keyframe, and its video job launches once that shot is ready for the queue.",
+    "If a key subject, object, or recurring visual form changes unexpectedly across neighboring shots, issue an image-edit correction pass before launching the corresponding video clip."
+  ].filter(Boolean).join("\n");
 
   const imagePayloadExample = JSON.stringify({
-    model: runtimeConfig.image_model,
+    model: runtimeConfig.image_model_sequence?.[0] || runtimeConfig.image_model,
     input: { prompt: scenes[0].keyframePrompt },
     parameters: { size: "1280*720", prompt_extend: false }
   }, null, 2);
@@ -525,12 +719,7 @@ function buildPromptStructure(payload, scenes, bible) {
       img_url: "<scene_keyframe_url>",
       prompt: scenes[0].videoPrompt
     },
-    parameters: {
-      resolution: runtimeConfig.video_resolution,
-      duration: runtimeConfig.video_duration_seconds,
-      prompt_extend: false,
-      watermark: false
-    }
+    parameters: getVideoModelOptions(primaryVideoModel)
   }, null, 2);
 
   return {
@@ -539,7 +728,6 @@ function buildPromptStructure(payload, scenes, bible) {
     imagePromptTemplate,
     videoPromptTemplate,
     continuity,
-    ttsPayloadExample,
     imagePayloadExample,
     videoPayloadExample,
     sampleImagePrompt: scenes[0].keyframePrompt,
@@ -548,139 +736,123 @@ function buildPromptStructure(payload, scenes, bible) {
 }
 
 function buildOpsPlan(payload, scenes) {
-  const timeline = scenes.map((scene) => `${scene.sceneNumber}. ${scene.title}: ${scene.duration}s`).join("\n");
+  const timeline = scenes.map((scene) => getSceneTimelineEntry(scene)).join("\n");
   const runtimeConfig = getRuntimeConfig();
 
   return {
     endpointPlan: [
-      "Step 1: user enters one brief; app calls Kimi 2.5 to derive title-aligned 8 scene beats.",
-      "Step 2: app derives one narration segment per scene and submits scene-level TTS jobs.",
-      "Step 3: app submits scene keyframes first, with conservative retry and backoff.",
-      "Step 4: after keyframes are ready, scene video jobs are queued in small batches against the official DashScope video endpoint.",
-      "Step 5: server-side FFmpeg muxes each clip with its scene narration, normalizes to 1280x720, and concatenates the final MP4."
+      "Step 1: user enters one brief; app calls Kimi 2.5 to derive a shot list sized to the target runtime.",
+      "Step 2: app submits shot keyframes first, with conservative retry and backoff.",
+      "Step 3: after keyframes are ready, shot video jobs are queued in small batches against the official DashScope video endpoint.",
+      "Step 4: each video prompt includes diegetic audio direction and optional short human vocal presence so Wan 2.5/2.6 can return clips with sound already embedded.",
+      "Step 5: server-side FFmpeg normalizes each clip to 1280x720 and concatenates the final MP4."
     ],
     assemblyChecklist: [
       `Fixed runtime: ${scenes.reduce((sum, scene) => sum + scene.duration, 0)} seconds.`,
-      `Narration audio is generated scene-by-scene via ${runtimeConfig.tts_model}.`,
-      `Scene video fallback order: ${runtimeConfig.video_model_sequence.join(" -> ")}.`,
+      `Shot video fallback order: ${runtimeConfig.video_model_sequence.join(" -> ")}.`,
+      `Target clip duration: ${runtimeConfig.video_duration_seconds}s on the Wan 2.6 path.`,
+      "Clip audio comes directly from the video model; there is no separate narration track in the production path.",
       `Every finished clip is normalized to 1280x720 before final concat.`,
       "Final deliverable: 1280x720 H.264 MP4 with audio."
     ],
     concreteExecution: [
-      "TTS endpoint: POST /api/v1/services/aigc/multimodal-generation/generation",
       "Image endpoint: POST /api/v1/services/aigc/text2image/image-synthesis",
       "Video endpoint: POST /api/v1/services/aigc/video-generation/video-synthesis",
       "Polling endpoint: GET /api/v1/tasks/{task_id}",
-      "Execution pattern: scene TTS runs in parallel with keyframes; video starts after keyframes succeed and flows through a bounded queue.",
-      "Result URLs consumed in-chain: keyframe URL -> video; scene audio URLs -> per-scene mux -> final assembly"
+      "Execution pattern: keyframes run first; video starts after keyframes succeed and flows through a bounded queue.",
+      "Result URLs consumed in-chain: keyframe URL -> native-audio video clip -> final assembly"
     ],
     timeline
   };
 }
 
-function buildNarrationScript(payload, scenes) {
-  const intro = `${payload.title}. ${payload.logline}`;
-  const sceneLines = scenes.map((scene) => {
-    return [
-      `Scene ${scene.sceneNumber}, ${scene.title}.`,
-      scene.summary,
-      `The emotional beat is ${scene.emotion}, and the dramatic purpose is to ${scene.purpose.toLowerCase()}.`
-    ].join(" ");
-  });
-  const outro = "The final cut should play as one continuous short drama, with clear scene transitions and a steady narrative voice.";
-  return [intro, ...sceneLines, outro].join(" ");
-}
-
-function buildCombinedSceneNarration(result) {
-  return result.scenes.map((scene) => scene.narrationText).filter(Boolean).join(" ");
-}
-
 async function buildResult(payload) {
   let scenes;
   let llmModel = "";
+  let resolvedPayload = { ...payload };
   try {
     setStatus("processing", "Generating scene beats with Kimi 2.5...");
     const planned = await requestLlmSceneBeats(payload);
-    scenes = buildScenesFromBeats(payload, planned.scenes);
+    resolvedPayload = mergeStoryIntoPayload(payload, planned.story);
+    scenes = buildScenesFromBeats(resolvedPayload, planned.scenes);
     llmModel = planned.model || "";
-    appendLiveLog(`Scene plan generated by ${llmModel || "Kimi"}.`, "ready");
+    appendLiveLog(`Shot plan generated by ${llmModel || "Kimi"}.`, "ready");
   } catch (error) {
-    appendLiveLog(`Kimi planner unavailable, using fallback scene template: ${error.message}`, "failed");
-    scenes = buildScenesFromBeats(payload, defaultBeats(payload));
+    appendLiveLog(`Kimi planner unavailable, using fallback shot template: ${error.message}`, "failed");
+    scenes = buildScenesFromBeats(resolvedPayload, defaultBeats(resolvedPayload));
   }
-  const bible = buildCharacterBible(payload);
-  const promptStructure = buildPromptStructure(payload, scenes, bible);
-  const ops = buildOpsPlan(payload, scenes);
-  const enrichedPayload = {
-    ...payload,
-    narration: buildNarrationScript(payload, scenes)
-  };
+  const bible = buildCharacterBible(resolvedPayload);
+  const promptStructure = buildPromptStructure(resolvedPayload, scenes, bible);
+  const ops = buildOpsPlan(resolvedPayload, scenes);
 
   return {
-    payload: enrichedPayload,
+    payload: resolvedPayload,
     scenes,
     bible,
     llmModel,
     promptStructure,
     ops,
-    totalRuntime: scenes.reduce((sum, scene) => sum + scene.duration, 0)
+    totalRuntime: scenes.reduce((sum, scene) => sum + scene.duration, 0),
+    shotCount: scenes.length
   };
 }
 
 function buildCharacterBible(payload) {
   return {
     protagonist: {
-      identity: payload.protagonist,
+      identity: payload.protagonist || "Primary recurring visual form from the Kimi-derived story",
       anchors: [
-        "navy scrubs remain visible under outerwear",
-        "silver analog watch always on left wrist",
-        "sharp bob haircut and tired observant eyes stay constant",
-        "emotion moves from controlled detachment to vulnerable trust"
+        "preserve the same defining silhouette, proportions, and identifying traits across all shots",
+        "keep the lead subject emotionally legible from shot to shot",
+        "maintain wardrobe, fur, markings, or props unless the story explicitly changes them",
+        "avoid sudden species, costume, or age drift"
       ]
     },
     secondary: {
-      identity: payload.secondary,
+      identity: payload.secondary || "",
       anchors: [
-        "charcoal hooded jacket and messenger bag remain constant",
-        "same eye shape as Mira to preserve sibling resemblance",
-        "voice and body language practical rather than theatrical",
-        "emotion moves from guarded guilt to direct honesty"
+        "preserve the same companion or counterpart identity across all shots",
+        "keep relative scale and relationship cues stable",
+        "maintain distinctive visual traits, props, or markings",
+        "avoid random role or appearance changes"
       ]
     },
     worldAnchors: [
-      payload.visualWorld,
-      "lens language alternates between pressure close-ups and short bursts of wide spatial relief",
-      "rain, wet glass, and failing emergency lights repeat as continuity motifs"
+      payload.visualWorld || "the environment, color language, and spatial logic should all be inferred from the brief and stay consistent",
+      "lens language alternates between intimate detail and wider spatial orientation",
+      "repeat environment motifs and color continuity so shots feel part of one world"
     ]
   };
 }
 
 function renderOverview(result) {
   if (!els.storySummary || !els.characterSummary || !els.renderSummary || !els.sceneStrip) return;
+  const genreLabel = result.payload.genre ? result.payload.genre.toLowerCase() : "short visual story";
+  const logline = result.payload.logline || "Kimi derived a concise story package from the user brief for downstream image and video generation.";
   els.storySummary.innerHTML = `
-    <p><strong>${result.payload.title}</strong> is structured as an eight-scene ${result.payload.genre.toLowerCase()} with a total runtime of <strong>${result.totalRuntime}s</strong>.</p>
-    <p>${result.payload.logline}</p>
+    <p><strong>${result.payload.title}</strong> is structured as a shot list for a ${genreLabel} with a total runtime of <strong>${result.totalRuntime}s</strong>.</p>
+    <p>${logline}</p>
   `;
 
   els.characterSummary.innerHTML = `
-    <p><strong>Mira anchor:</strong> ${result.bible.protagonist.identity}</p>
-    <p><strong>Elias anchor:</strong> ${result.bible.secondary.identity}</p>
-    <p>Consistency is enforced by preserving hair silhouette, wardrobe, props, sibling facial resemblance, and recurring rain-and-emergency-light motifs.</p>
+    <p><strong>Primary anchor:</strong> ${result.bible.protagonist.identity}</p>
+    ${result.bible.secondary.identity ? `<p><strong>Secondary anchor:</strong> ${result.bible.secondary.identity}</p>` : ""}
+    <p>Consistency is enforced by preserving subject identity, visual traits, props, scale relationships, and recurring world motifs.</p>
   `;
 
   els.renderSummary.innerHTML = `
-    <p>Render as <strong>${result.payload.resolution}</strong>, target one approved keyframe per scene, then turn each keyframe into a clip using text + image -> video generation.</p>
-    <p>Final assembly combines 8 clips, dialogue audio, score, subtitles, and a single 180s timeline.</p>
+    <p>Render as <strong>${result.payload.resolution}</strong>, target one approved keyframe per shot, then turn each keyframe into a short clip using text + image -> video generation.</p>
+    <p>Final assembly combines many short native-audio clips into one runtime-matched timeline.</p>
   `;
 
   els.sceneStrip.innerHTML = result.scenes.map((scene) => `
     <article class="scene-card">
-      <h3>Scene ${scene.sceneNumber}: ${scene.title}</h3>
+      <h3>${getSceneDisplayLabel(scene)}</h3>
       <p>${scene.summary}</p>
       <ul>
         <li><strong>Duration:</strong> ${scene.duration}s</li>
-        <li><strong>Camera:</strong> ${scene.camera}</li>
-        <li><strong>Emotion:</strong> ${scene.emotion}</li>
+        ${hasMeaningfulBeatValue(scene.camera, "cinematic medium shot") ? `<li><strong>Camera:</strong> ${scene.camera}</li>` : ""}
+        ${hasMeaningfulBeatValue(scene.emotion, "rising tension") ? `<li><strong>Emotion:</strong> ${scene.emotion}</li>` : ""}
       </ul>
     </article>
   `).join("");
@@ -694,11 +866,10 @@ function renderPromptStructureInto(target, result) {
     { title: "3. Image Prompt Template", body: result.promptStructure.imagePromptTemplate },
     { title: "4. Video Prompt Template", body: result.promptStructure.videoPromptTemplate },
     { title: "5. Character Consistency Rules", body: result.promptStructure.continuity },
-    { title: "6. Concrete TTS Request Payload", body: result.promptStructure.ttsPayloadExample },
-    { title: "7. Concrete Text-to-Image Payload", body: result.promptStructure.imagePayloadExample },
-    { title: "8. Concrete Image-to-Video Payload", body: result.promptStructure.videoPayloadExample },
-    { title: "9. Concrete Scene Image Prompt", body: result.promptStructure.sampleImagePrompt },
-    { title: "10. Concrete Scene Video Prompt", body: result.promptStructure.sampleVideoPrompt }
+    { title: "6. Concrete Text-to-Image Payload", body: result.promptStructure.imagePayloadExample },
+    { title: "7. Concrete Image-to-Video Payload", body: result.promptStructure.videoPayloadExample },
+    { title: "8. Concrete Scene Image Prompt", body: result.promptStructure.sampleImagePrompt },
+    { title: "9. Concrete Scene Video Prompt", body: result.promptStructure.sampleVideoPrompt }
   ];
 
   target.innerHTML = sections.map((section) => `
@@ -737,7 +908,6 @@ function renderShotPlanInto(target, result) {
   target.innerHTML = result.scenes.map((scene) => {
     const keyframeStatus = renderStatus(scene.keyframeStatus, scene.keyframeJobId);
     const videoStatus = renderStatus(scene.videoStatus, scene.videoJobId);
-    const audioStatus = renderStatus(scene.audioStatus || "pending", "");
     const keyframeImage = scene.keyframeUrl
       ? `<img class="shot-image" src="${scene.keyframeUrl}" alt="Scene ${scene.sceneNumber} keyframe">`
       : "";
@@ -750,30 +920,42 @@ function renderShotPlanInto(target, result) {
       scene.keyframeUrl ? `<a href="${scene.keyframeUrl}" target="_blank" rel="noopener" download="${imageDownloadName}">Download keyframe</a>` : "",
       scene.videoUrl ? `<a href="${scene.videoUrl}" target="_blank" rel="noopener" download="${videoDownloadName}">Download clip</a>` : ""
     ].filter(Boolean).join(" | ");
+    const metaItems = [
+      `${scene.duration}s`,
+      hasMeaningfulBeatValue(scene.location, "Story setting") ? scene.location : "",
+      hasMeaningfulBeatValue(scene.emotion, "rising tension") ? scene.emotion : ""
+    ].filter(Boolean);
+    const sceneBody = String(scene.prompt || scene.summary || "").trim();
+    const purposeLine = String(scene.purpose || "").trim()
+      ? `<div><strong>Scene Purpose:</strong> ${scene.purpose}</div>`
+      : "";
+    const promptDetails = (scene.keyframePrompt || scene.videoPrompt)
+      ? `
+        <details class="prompt-details">
+          <summary>Prompt details</summary>
+          ${scene.keyframePrompt ? `<div><strong>Keyframe Prompt:</strong><br>${escapeHtml(scene.keyframePrompt)}</div>` : ""}
+          ${scene.videoPrompt ? `<div style="margin-top:12px;"><strong>Video Prompt:</strong><br>${escapeHtml(scene.videoPrompt)}</div>` : ""}
+        </details>
+      `
+      : "";
 
     return `
       <article class="shot-card">
-        <h3>Scene ${scene.sceneNumber}: ${scene.title}</h3>
-        <div class="shot-meta">
-          <span>${scene.duration}s</span>
-          <span>${scene.location}</span>
-          <span>${scene.emotion}</span>
-        </div>
+        <h3>${getSceneDisplayLabel(scene)}</h3>
+        ${metaItems.length ? `<div class="shot-meta">${metaItems.map((item) => `<span>${item}</span>`).join("")}</div>` : ""}
         <div class="shot-status">
           <div><strong>Keyframe:</strong> ${keyframeStatus}</div>
-          <div><strong>Narration:</strong> ${audioStatus}</div>
           <div><strong>Video:</strong> ${videoStatus}</div>
         </div>
         ${keyframeImage}
         ${videoPreview}
         ${links ? `<div class="shot-links">${links}</div>` : ""}
         ${scene.videoError ? `<div class="hint">Video error: ${escapeHtml(scene.videoError)}</div>` : ""}
-        ${scene.audioError ? `<div class="hint">Narration error: ${escapeHtml(scene.audioError)}</div>` : ""}
         ${scene.keyframeError ? `<div class="hint">Keyframe error: ${escapeHtml(scene.keyframeError)}</div>` : ""}
         ${scene.videoModel ? `<div class="hint">Video model: ${escapeHtml(scene.videoModel)}</div>` : ""}
-        <div><strong>Scene Purpose:</strong> ${scene.purpose}</div>
-        <div><strong>Keyframe Prompt:</strong><br>${escapeHtml(scene.keyframePrompt)}</div>
-        <div style="margin-top:12px;"><strong>Video Prompt:</strong><br>${escapeHtml(scene.videoPrompt)}</div>
+        ${purposeLine}
+        ${sceneBody ? `<div><strong>Scene Beat:</strong> ${escapeHtml(sceneBody)}</div>` : ""}
+        ${promptDetails}
       </article>
     `;
   }).join("");
@@ -795,8 +977,7 @@ function renderStatus(status, jobId) {
           : status === "queued"
             ? "Queued"
             : "Pending";
-  const suffix = jobId ? ` (${jobId})` : "";
-  return `<span class="status-pill status-${status}">${label}${suffix}</span>`;
+  return `<span class="status-pill status-${status}">${label}</span>`;
 }
 
 function renderOpsInto(target, result) {
@@ -835,29 +1016,27 @@ function renderAll(result) {
 function normalizeStoredScene(scene, index) {
   const durations = [22, 22, 22, 22, 23, 23, 23, 23];
   const sceneNumber = Number(scene?.sceneNumber || index + 1) || index + 1;
+  const prompt = String(scene?.prompt || "");
   return {
     sceneNumber,
     title: String(scene?.title || `Scene ${sceneNumber}`),
-    purpose: String(scene?.purpose || "Advance the dramatic arc."),
-    summary: String(scene?.summary || "Continue the story progression with continuity-safe character actions."),
-    location: String(scene?.location || "Primary story location"),
-    camera: String(scene?.camera || "cinematic medium shot"),
-    emotion: String(scene?.emotion || "rising tension"),
+    purpose: String(scene?.purpose || (prompt ? "" : "Advance the dramatic arc.")),
+    summary: String(scene?.summary || prompt || "Continue the story progression with continuity-safe character actions."),
+    prompt,
+    location: String(scene?.location || (prompt ? "" : "Primary story location")),
+    camera: String(scene?.camera || (prompt ? "" : "cinematic medium shot")),
+    emotion: String(scene?.emotion || (prompt ? "" : "rising tension")),
     duration: Number(scene?.duration || durations[index] || 22),
     keyframePrompt: String(scene?.keyframePrompt || ""),
     videoPrompt: String(scene?.videoPrompt || ""),
     keyframeStatus: scene?.keyframeStatus || (scene?.keyframeUrl ? "ready" : "pending"),
     videoStatus: scene?.videoStatus || (scene?.videoUrl ? "ready" : "pending"),
-    audioStatus: scene?.audioStatus || (scene?.audioUrl ? "ready" : "pending"),
     keyframeJobId: scene?.keyframeJobId || "",
     videoJobId: scene?.videoJobId || "",
     keyframeUrl: String(scene?.keyframeUrl || ""),
     videoUrl: String(scene?.videoUrl || ""),
-    audioUrl: String(scene?.audioUrl || ""),
     videoModel: String(scene?.videoModel || ""),
-    narrationText: String(scene?.narrationText || ""),
     keyframeError: String(scene?.keyframeError || ""),
-    audioError: String(scene?.audioError || ""),
     videoError: String(scene?.videoError || "")
   };
 }
@@ -876,12 +1055,11 @@ function buildStoredManifest(result, payload) {
       protagonist: payload?.protagonist || result?.payload?.protagonist || "",
       secondary: payload?.secondary || result?.payload?.secondary || "",
       visualWorld: payload?.visualWorld || result?.payload?.visualWorld || "",
-      narration: payload?.narration || result?.payload?.narration || "",
       runtime: result?.totalRuntime || payload?.runtime || 180,
-      resolution: payload?.resolution || result?.payload?.resolution || "1280x720",
-      audioUrl: payload?.audioUrl || result?.payload?.audioUrl || ""
+      resolution: payload?.resolution || result?.payload?.resolution || "1280x720"
     },
     totalRuntime: result?.totalRuntime || payload?.runtime || 180,
+    shotCount: Array.isArray(result?.scenes) ? result.scenes.length : getShotCountForRuntime(payload?.runtime || 180),
     llmModel: result?.llmModel || "",
     finalVideoUrl: result?.finalVideoUrl || "",
     scenes: Array.isArray(result?.scenes) ? result.scenes.map((scene, index) => normalizeStoredScene(scene, index)) : [],
@@ -897,15 +1075,11 @@ function absolutizeManifestMediaUrls(manifest) {
   if (clone.finalVideoUrl) {
     clone.finalVideoUrl = toAbsoluteMediaUrl(clone.finalVideoUrl);
   }
-  if (clone.payload?.audioUrl) {
-    clone.payload.audioUrl = toAbsoluteMediaUrl(clone.payload.audioUrl);
-  }
   if (Array.isArray(clone.scenes)) {
     clone.scenes = clone.scenes.map((scene) => ({
       ...scene,
       keyframeUrl: scene?.keyframeUrl ? toAbsoluteMediaUrl(scene.keyframeUrl) : "",
       videoUrl: scene?.videoUrl ? toAbsoluteMediaUrl(scene.videoUrl) : "",
-      audioUrl: scene?.audioUrl ? toAbsoluteMediaUrl(scene.audioUrl) : "",
       videoModel: scene?.videoModel || ""
     }));
   }
@@ -921,16 +1095,14 @@ function hydrateStoredResult(data) {
         brief: data.brief || "",
         title: data.title || "",
         runtime: data.runtime || 180,
-        resolution: data.resolution || "1280x720",
-        audioUrl: data.audio || ""
+        resolution: data.resolution || "1280x720"
       };
   const derived = deriveFromBrief(sourcePayload.brief || data.brief || "");
   const payload = {
     ...derived,
     ...sourcePayload,
     runtime: Number(sourcePayload.runtime || data.runtime || 180) || 180,
-    resolution: String(sourcePayload.resolution || data.resolution || "1280x720"),
-    audioUrl: String(sourcePayload.audioUrl || data.audio || "")
+    resolution: String(sourcePayload.resolution || data.resolution || "1280x720")
   };
 
   const scenes = Array.isArray(data.scenes) ? data.scenes.map(normalizeStoredScene) : buildScenes(payload);
@@ -938,6 +1110,7 @@ function hydrateStoredResult(data) {
   const promptStructure = data.promptStructure || buildPromptStructure(payload, scenes, bible);
   const ops = data.ops || buildOpsPlan(payload, scenes);
   const totalRuntime = Number(data.totalRuntime || scenes.reduce((sum, scene) => sum + scene.duration, 0)) || payload.runtime;
+  const shotCount = Number(data.shotCount || scenes.length) || scenes.length;
 
   return {
     payload,
@@ -947,6 +1120,7 @@ function hydrateStoredResult(data) {
     ops,
     llmModel: data.llmModel || "",
     totalRuntime,
+    shotCount,
     finalVideoUrl: String(data.finalVideoUrl || data.finalVideo || data.video || "")
   };
 }
@@ -1016,6 +1190,23 @@ function isVideoModelFallbackError(message) {
   );
 }
 
+function isImageModelFallbackError(message) {
+  const text = String(message || "").toLowerCase();
+  return (
+    text.includes("quota") ||
+    text.includes("free quota") ||
+    text.includes("insufficientbalance") ||
+    text.includes("insufficient balance") ||
+    text.includes("billable") ||
+    text.includes("model not") ||
+    text.includes("not enabled") ||
+    text.includes("unsupported model") ||
+    text.includes("model code") ||
+    text.includes("http 403") ||
+    text.includes("http 429")
+  );
+}
+
 function getVideoModelOptions(model) {
   const runtimeConfig = getRuntimeConfig();
   const capabilities = runtimeConfig.video_model_capabilities?.[model] || {};
@@ -1028,7 +1219,7 @@ function getVideoModelOptions(model) {
     parameters.duration = runtimeConfig.video_duration_seconds;
   }
   if (capabilities.supportsAudioFlag) {
-    parameters.audio = false;
+    parameters.audio = true;
   }
   return parameters;
 }
@@ -1060,7 +1251,14 @@ function summarizeWorkflowFailures(result) {
 }
 
 async function fetchJson(url, options = {}) {
-  const response = await fetch(url, options);
+  const headers = new Headers(options.headers || {});
+  if (state.runToken && String(url || "").startsWith("/api/")) {
+    headers.set("X-Workflow-Run-Token", state.runToken);
+  }
+  const response = await fetch(url, {
+    ...options,
+    headers
+  });
   if (!response.ok) {
     const text = await response.text();
     throw new Error(`HTTP ${response.status}: ${text || response.statusText}`);
@@ -1091,13 +1289,13 @@ function resolveImageUrl(task, fallbackId) {
 }
 
 function resolveVideoUrl(task, fallbackId) {
-  const url = task?.output?.results?.video_url;
+  const url = task?.output?.video_url || task?.output?.results?.video_url;
   if (url) return toAbsoluteMediaUrl(url);
   return toAbsoluteMediaUrl(`/result/${fallbackId}`);
 }
 
 function resolveAudioUrl(task, fallbackId) {
-  const url = task?.output?.task_result?.audio_url;
+  const url = task?.output?.audio?.url || task?.output?.task_result?.audio_url;
   if (url) return toAbsoluteMediaUrl(url);
   return toAbsoluteMediaUrl(`/result/${fallbackId}`);
 }
@@ -1162,20 +1360,40 @@ async function prepareVideoInputRef(url, label) {
 async function submitKeyframe(scene) {
   await waitForTransportCooldown("Keyframe submissions paused");
   const runtimeConfig = getRuntimeConfig();
-  const payload = {
-    model: runtimeConfig.image_model,
-    input: { prompt: scene.keyframePrompt },
-    parameters: { size: "1280*720", prompt_extend: false }
-  };
-  const response = await fetchJson(`/api/v1/services/aigc/text2image/image-synthesis`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload)
-  });
-  return {
-    taskId: response?.output?.task_id || response?.request_id || "",
-    immediateUrl: response?.output?.results?.[0]?.url || ""
-  };
+  const modelSequence = Array.isArray(runtimeConfig.image_model_sequence) && runtimeConfig.image_model_sequence.length
+    ? runtimeConfig.image_model_sequence
+    : [runtimeConfig.image_model || defaultRuntimeConfig().image_model];
+  let lastError = null;
+
+  for (const model of modelSequence) {
+    const payload = {
+      model,
+      input: { prompt: scene.keyframePrompt },
+      parameters: { size: "1280*720", prompt_extend: false }
+    };
+
+    try {
+      const response = await fetchJson(`/api/v1/services/aigc/text2image/image-synthesis`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      return {
+        taskId: response?.output?.task_id || response?.request_id || "",
+        immediateUrl: response?.output?.results?.[0]?.url || "",
+        model
+      };
+    } catch (error) {
+      lastError = error;
+      if (model !== modelSequence[modelSequence.length - 1] && isImageModelFallbackError(error.message)) {
+        appendLiveLog(`Image model ${model} unavailable or out of quota for scene ${scene.sceneNumber}. Trying next fallback model...`, "processing");
+        continue;
+      }
+      throw error;
+    }
+  }
+
+  throw lastError || new Error("No image model available");
 }
 
 async function submitVideo(scene, imageUrl) {
@@ -1220,70 +1438,6 @@ async function submitVideo(scene, imageUrl) {
   }
 
   throw lastError || new Error("No video model available");
-}
-
-async function submitTts(payload) {
-  const text = typeof payload === "string" ? payload : payload?.narration;
-  if (!text) {
-    throw new Error("Narration text is required for TTS");
-  }
-  const runtimeConfig = getRuntimeConfig();
-
-  const ttsPayload = {
-    model: runtimeConfig.tts_model,
-    input: { text },
-    parameters: {
-      voice: "Cherry",
-      language_type: "English",
-      format: "wav",
-      stream: false
-    }
-  };
-
-  const response = await fetchJson(`/api/v1/services/aigc/multimodal-generation/generation`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(ttsPayload)
-  });
-
-  const immediateAudio = response?.output?.task_result?.audio_url;
-  if (immediateAudio) {
-    return toAbsoluteMediaUrl(immediateAudio);
-  }
-
-  const taskId = response?.output?.task_id || response?.request_id;
-  if (!taskId) {
-    throw new Error("No task id returned from TTS");
-  }
-
-  const task = await pollTask(taskId, "TTS generation", 5400000, ({ taskStatus, elapsedSec }) => {
-    updateStatusBanner("processing", `Generating narration audio (TTS)... ${taskStatus} (${elapsedSec}s)`);
-    setProgress(state.progress.done, `TTS ${taskStatus} (${elapsedSec}s)`);
-  });
-  return resolveAudioUrl(task, taskId);
-}
-
-async function generateSceneNarration(result, scene) {
-  scene.audioStatus = "processing";
-  renderShotPlan(result);
-  const audioUrl = await submitTts(scene.narrationText);
-  scene.audioUrl = audioUrl;
-  scene.audioStatus = "ready";
-  renderShotPlan(result);
-}
-
-async function generateSceneNarrations(result) {
-  appendLiveLog("Submitting scene narration audio jobs...", "processing");
-  await mapWithConcurrency(result.scenes, SCENE_TTS_CONCURRENCY, async (scene) => {
-    try {
-      await generateSceneNarration(result, scene);
-    } catch (error) {
-      scene.audioStatus = "failed";
-      scene.audioError = error.message;
-      renderShotPlan(result);
-      appendLiveLog(`Scene ${scene.sceneNumber} narration failed: ${error.message}`, "failed");
-    }
-  });
 }
 
 async function generateSceneKeyframe(result, scene) {
@@ -1464,7 +1618,7 @@ async function runWorkflow(result) {
 
   await flushUi();
   appendLiveLog(
-    `Scene pipeline started: reliability mode runs keyframes first, then scene videos enter a small queue.`,
+    `Shot pipeline started: the planner now targets many short beats so the final runtime matches ${getClipDurationSeconds()}-second generation reality.`,
     "processing"
   );
   const keyframeSubmitConcurrency = KEYFRAME_SUBMIT_CONCURRENCY;
@@ -1516,6 +1670,15 @@ async function runWorkflow(result) {
   return result;
 }
 
+function markPlannerOnlyResult(result) {
+  result.scenes.forEach((scene) => {
+    scene.keyframeStatus = "skipped";
+    scene.videoStatus = "skipped";
+    scene.keyframeError = "";
+    scene.videoError = "";
+  });
+}
+
 function storePremade(result, payload) {
   const manifest = buildStoredManifest(result, payload);
   localStorage.setItem(PREMADE_KEY, JSON.stringify(manifest));
@@ -1534,10 +1697,6 @@ function clearCurrentFinalOutput() {
   if (els.finalVideoDownload) {
     els.finalVideoDownload.href = "#";
     els.finalVideoDownload.style.display = "none";
-  }
-  if (els.finalAudioDownload) {
-    els.finalAudioDownload.href = "#";
-    els.finalAudioDownload.style.display = "none";
   }
   if (els.saveExampleOutput) {
     els.saveExampleOutput.style.display = "none";
@@ -1558,14 +1717,8 @@ function renderCurrentFinalOutput(result) {
     els.finalVideoDownload.download = `video${fileExtensionFromUrl(manifest.finalVideoUrl, ".mp4")}`;
     els.finalVideoDownload.style.display = "";
   }
-  if (els.finalAudioDownload) {
-    const audioUrl = manifest.payload?.audioUrl || "";
-    els.finalAudioDownload.href = audioUrl ? toAbsoluteMediaUrl(audioUrl) : "#";
-    els.finalAudioDownload.download = `audio${fileExtensionFromUrl(audioUrl, ".wav")}`;
-    els.finalAudioDownload.style.display = audioUrl ? "" : "none";
-  }
   if (els.saveExampleOutput) {
-    els.saveExampleOutput.style.display = "block";
+    els.saveExampleOutput.style.display = isExampleCaptureEnabled() ? "block" : "none";
   }
 }
 
@@ -1585,19 +1738,19 @@ function renderShowcase(data) {
   els.demoBrief.innerHTML = `
     <strong>${escapeHtml(result.payload.title || "Short Drama Example Output")}</strong>
     <p class="hint" style="margin-top:10px;">${escapeHtml(result.payload.brief || "No brief stored.")}</p>
-    <p class="hint">Runtime: ${escapeHtml(result.totalRuntime)}s | Resolution: ${escapeHtml(result.payload.resolution)}</p>
+    <p class="hint">Runtime: ${escapeHtml(result.totalRuntime)}s | Shots: ${escapeHtml(result.shotCount || result.scenes.length)} | Resolution: ${escapeHtml(result.payload.resolution)}</p>
   `;
 
   if (els.demoStatusBanner) {
     els.demoStatusBanner.className = "status-banner complete";
-    els.demoStatusBanner.textContent = `Workflow complete. Planned ${result.totalRuntime}s short drama at ${result.payload.resolution}.`;
+    els.demoStatusBanner.textContent = `Workflow complete. Planned ${result.totalRuntime}s short drama across ${result.shotCount || result.scenes.length} shots at ${result.payload.resolution}.`;
   }
   if (els.demoProgressFill) els.demoProgressFill.style.width = "100%";
   if (els.demoProgressText) els.demoProgressText.textContent = "100%";
   if (els.demoProgressDetail) els.demoProgressDetail.textContent = "Workflow complete";
 
   if (els.demoFinalOutputPanel) {
-    els.demoFinalOutputPanel.style.display = (result.finalVideoUrl || result.payload.audioUrl) ? "block" : "none";
+    els.demoFinalOutputPanel.style.display = result.finalVideoUrl ? "block" : "none";
   }
   if (els.demoFinalVideo) els.demoFinalVideo.src = toAbsoluteMediaUrl(result.finalVideoUrl || "");
   if (els.demoFinalVideoDownload) {
@@ -1605,13 +1758,6 @@ function renderShowcase(data) {
     els.demoFinalVideoDownload.download = `video${fileExtensionFromUrl(result.finalVideoUrl, ".mp4")}`;
     els.demoFinalVideoDownload.style.display = result.finalVideoUrl ? "" : "none";
   }
-  if (els.demoFinalAudioDownload) {
-    const audioUrl = result.payload.audioUrl || "";
-    els.demoFinalAudioDownload.href = audioUrl ? toAbsoluteMediaUrl(audioUrl) : "#";
-    els.demoFinalAudioDownload.download = `audio${fileExtensionFromUrl(audioUrl, ".wav")}`;
-    els.demoFinalAudioDownload.style.display = audioUrl ? "" : "none";
-  }
-  if (els.demoNarrationAudio) els.demoNarrationAudio.src = toAbsoluteMediaUrl(result.payload.audioUrl || "");
   if (els.demoImage) {
     const firstImage = result.scenes.find((scene) => scene.keyframeUrl)?.keyframeUrl || "";
     els.demoImage.src = toAbsoluteMediaUrl(firstImage);
@@ -1637,18 +1783,6 @@ async function loadPremadeFromServer() {
     if (!response.ok) {
       return false;
     }
-    const payload = await response.json();
-    renderPremade(payload);
-    return true;
-  } catch (_) {
-    return false;
-  }
-}
-
-async function loadFallbackPremadeFromServer() {
-  try {
-    const response = await fetch("/premade.json", { cache: "no-store" });
-    if (!response.ok) return false;
     const payload = await response.json();
     renderPremade(payload);
     return true;
@@ -1692,10 +1826,37 @@ async function loadRuntimeConfig() {
       ...defaultRuntimeConfig(),
       ...(health?.runtime || {})
     };
+    state.runGuard = health?.run_guard || null;
   } catch (_) {
     state.upstreamBaseUrl = "";
     state.runtimeConfig = defaultRuntimeConfig();
+    state.runGuard = null;
   }
+  applyRunGuardState();
+}
+
+function applyRunGuardState() {
+  if (!els.runWorkflow || state.workflowRunning) return;
+  const exhausted = Boolean(state.runGuard?.exhausted);
+  els.runWorkflow.disabled = exhausted;
+  els.runWorkflow.textContent = exhausted ? "Run Limit Reached" : "Generate Short Drama";
+  if (exhausted && els.statusBanner) {
+    updateStatusBanner("idle", `Production run limit reached (${state.runGuard.used_runs}/${state.runGuard.max_runs}). New runs are blocked.`);
+  }
+}
+
+async function reserveProductionRun() {
+  const response = await fetchJson("/api/local/run-guard/start", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: "{}"
+  });
+  state.runToken = String(response?.token || "").trim();
+  state.runGuard = response;
+  if (Number.isFinite(response?.remaining_runs)) {
+    appendLiveLog(`Production run reserved. ${response.remaining_runs} run${response.remaining_runs === 1 ? "" : "s"} remaining.`, "processing");
+  }
+  return response;
 }
 
 async function waitForMediaEvent(element, eventName) {
@@ -1717,119 +1878,15 @@ async function waitForMediaEvent(element, eventName) {
   });
 }
 
-async function assembleFinalVideoInBrowser(result, sceneAudioUrls) {
-  const clipUrls = result.scenes.map((scene) => scene.videoUrl).filter(Boolean);
-  const audioUrls = (Array.isArray(sceneAudioUrls) ? sceneAudioUrls : result.scenes.map((scene) => scene.audioUrl)).filter(Boolean);
-  if (!clipUrls.length || !audioUrls.length) {
-    throw new Error("Missing clip URLs or narration audio for final assembly");
-  }
-  if (typeof document === "undefined" || typeof MediaRecorder === "undefined" || typeof AudioContext === "undefined") {
-    throw new Error("Browser does not support in-page final video assembly");
-  }
-
-  const mimeType = chooseRecorderMimeType();
-  if (!mimeType) {
-    throw new Error("No supported MediaRecorder MIME type for final assembly");
-  }
-
-  const canvas = document.createElement("canvas");
-  canvas.width = 1280;
-  canvas.height = 720;
-  const ctx = canvas.getContext("2d");
-  if (!ctx) {
-    throw new Error("Canvas 2D context unavailable");
-  }
-
-  const video = document.createElement("video");
-  video.crossOrigin = "anonymous";
-  video.muted = true;
-  video.playsInline = true;
-  video.preload = "auto";
-
-  const audio = document.createElement("audio");
-  audio.crossOrigin = "anonymous";
-  audio.preload = "auto";
-  audio.src = toAbsoluteMediaUrl(audioUrls[0]);
-
-  const audioContext = new AudioContext();
-  const destination = audioContext.createMediaStreamDestination();
-  const audioSource = audioContext.createMediaElementSource(audio);
-  audioSource.connect(destination);
-  audioSource.connect(audioContext.destination);
-
-  const stream = canvas.captureStream(30);
-  destination.stream.getAudioTracks().forEach((track) => stream.addTrack(track));
-
-  const chunks = [];
-  const recorder = new MediaRecorder(stream, { mimeType });
-  recorder.ondataavailable = (event) => {
-    if (event.data && event.data.size > 0) {
-      chunks.push(event.data);
-    }
-  };
-
-  let drawHandle = 0;
-  const drawFrame = () => {
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    drawHandle = requestAnimationFrame(drawFrame);
-  };
-
-  const finalBlob = await new Promise(async (resolve, reject) => {
-    recorder.onerror = () => reject(new Error("MediaRecorder failed during final assembly"));
-    recorder.onstop = () => {
-      cancelAnimationFrame(drawHandle);
-      resolve(new Blob(chunks, { type: mimeType }));
-    };
-
-    try {
-      appendLiveLog("Assembling final video in browser...", "processing");
-      await audioContext.resume();
-      recorder.start(1000);
-
-      const audioReady = waitForMediaEvent(audio, "canplaythrough");
-      audio.load();
-      await audioReady;
-      const audioPlay = audio.play().catch(() => null);
-
-      for (const [index, clipUrl] of clipUrls.entries()) {
-        appendLiveLog(`Assembly pass: scene ${index + 1}/${clipUrls.length}`, "processing");
-        video.src = toAbsoluteMediaUrl(clipUrl);
-        video.load();
-        await waitForMediaEvent(video, "loadedmetadata");
-        if (!drawHandle) {
-          drawHandle = requestAnimationFrame(drawFrame);
-        }
-        await video.play();
-        await waitForMediaEvent(video, "ended");
-      }
-
-      await audioPlay;
-      recorder.stop();
-    } catch (error) {
-      cancelAnimationFrame(drawHandle);
-      try { recorder.stop(); } catch (_) { void 0; }
-      reject(error);
-    }
-  });
-
-  try {
-    audio.pause();
-    video.pause();
-    audioContext.close();
-  } catch (_) {
-    void 0;
-  }
-
-  return URL.createObjectURL(finalBlob);
+async function assembleFinalVideoInBrowser() {
+  throw new Error("Server-side FFmpeg assembly is required for native-audio clip concatenation");
 }
 
-async function assembleFinalVideo(result, sceneAudioUrls) {
-  const assemblyScenes = result.scenes.filter((scene) => scene.videoUrl && scene.audioUrl);
+async function assembleFinalVideo(result) {
+  const assemblyScenes = result.scenes.filter((scene) => scene.videoUrl);
   const clipUrls = assemblyScenes.map((scene) => scene.videoUrl);
-  const audioUrls = assemblyScenes.map((scene) => scene.audioUrl);
-  if (!clipUrls.length || !audioUrls.length) {
-    throw new Error("Missing clip URLs or narration audio for final assembly");
+  if (!clipUrls.length) {
+    throw new Error("Missing clip URLs for final assembly");
   }
 
   try {
@@ -1839,56 +1896,56 @@ async function assembleFinalVideo(result, sceneAudioUrls) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         clip_urls: clipUrls.map((url) => toAbsoluteMediaUrl(url)),
-        scene_audio_urls: assemblyScenes.map((scene) => toAbsoluteMediaUrl(scene.audioUrl)),
         scene_durations: assemblyScenes.map((scene) => scene.duration)
       })
     });
-    if (response?.audio_url) {
-      result.payload.audioUrl = toAbsoluteMediaUrl(response.audio_url);
-    }
     return toAbsoluteMediaUrl(response?.url || "");
   } catch (serverError) {
     appendLiveLog(`Server-side assembly unavailable, falling back to browser assembly: ${serverError.message}`, "failed");
-    return await assembleFinalVideoInBrowser(result, audioUrls);
+    return await assembleFinalVideoInBrowser(result);
   }
 }
 
 async function handleRun() {
   const payload = inputPayload();
-  const sceneCount = buildScenes(payload).length;
-  resetProgress(1 + sceneCount * 2, "Starting workflow...");
+  const profile = getRunProfile(els.runMode?.value);
+  const sceneCount = getRequestedShotCount(payload);
   clearTransportPressure();
   state.workflowRunning = true;
   els.runWorkflow.disabled = true;
-  els.runWorkflow.textContent = "Running...";
+  els.runWorkflow.textContent = "Generating...";
   clearLiveLog();
-  appendLiveLog("Workflow started.", "processing");
-  appendLiveLog("Official DashScope image and video tasks can take time. Keep this page open while jobs run and final assembly completes.", "processing");
+  state.runToken = "";
 
   try {
+    if (!profile.plannerOnly) {
+      await reserveProductionRun();
+    }
+    resetProgress(profile.plannerOnly ? 1 : 1 + sceneCount * 2, "Starting workflow...");
+    appendLiveLog("Workflow started.", "processing");
+    appendLiveLog(`Planned runtime: ${payload.runtime}s across ${sceneCount} shots at ${payload.resolution}.`, "processing");
+    appendLiveLog(profile.detail, "processing");
+    if (!profile.plannerOnly) {
+      appendLiveLog("Official DashScope image and video tasks can take time. Keep this page open while jobs run and final assembly completes.", "processing");
+    }
     const result = await buildResult(payload);
     const plannedPayload = result.payload;
-    plannedPayload.narration = buildCombinedSceneNarration(result);
-
-    const ttsPromise = (async () => {
-      setTtsStatus("Generating...", "processing");
-      await flushUi();
-      await generateSceneNarrations(result);
-      setTtsStatus("Ready", "ready");
-      appendLiveLog("Scene narration audio ready.", "ready");
-      bumpProgress("Scene narration audio ready");
-      return result.scenes.map((scene) => scene.audioUrl).filter(Boolean);
-    })();
-
-    const workflowPromise = runWorkflow(result);
-    const [sceneAudioUrls] = await Promise.all([ttsPromise, workflowPromise]);
-    plannedPayload.audioUrl = sceneAudioUrls[0] || "";
-    plannedPayload.sceneAudioUrls = sceneAudioUrls;
+    if (profile.plannerOnly) {
+      markPlannerOnlyResult(result);
+      state.result = result;
+      clearCurrentFinalOutput();
+      renderAll(result);
+      renderPipeline(null, ["story", "bible"]);
+      setStatus("complete", `Planner-only run complete. Built ${result.shotCount || result.scenes.length} shots and prompt structure without calling image/video APIs.`);
+      setProgress(state.progress.total, "Planner-only run complete");
+      return;
+    }
+    await runWorkflow(result);
 
     await retryFailedVideosBeforeAssembly(result);
 
     try {
-      result.finalVideoUrl = await assembleFinalVideo(result, sceneAudioUrls);
+      result.finalVideoUrl = await assembleFinalVideo(result);
       appendLiveLog("Final stitched video ready.", "ready");
     } catch (assemblyError) {
       appendLiveLog(`Final assembly skipped: ${assemblyError.message}`, "failed");
@@ -1900,7 +1957,7 @@ async function handleRun() {
     const failures = summarizeWorkflowFailures(result);
     const hasFailures = failures.failedKeyframes.length || failures.failedVideos.length;
     if (result.finalVideoUrl && !hasFailures) {
-      setStatus("complete", `Workflow complete. Planned ${result.totalRuntime}s short drama at ${plannedPayload.resolution}.`);
+      setStatus("complete", `Workflow complete. Planned ${result.totalRuntime}s short drama across ${result.shotCount || result.scenes.length} shots at ${plannedPayload.resolution}.`);
       setProgress(state.progress.total, "Workflow complete");
     } else if (result.finalVideoUrl) {
       setStatus("processing", `Workflow completed with failures. Missing or failed scenes: ${failures.failedVideos.join(", ") || "none"}. Final video was assembled from available clips.`);
@@ -1917,8 +1974,8 @@ async function handleRun() {
     setProgress(state.progress.done, "Workflow failed");
   } finally {
     state.workflowRunning = false;
-    els.runWorkflow.disabled = false;
-    els.runWorkflow.textContent = "Run Workflow";
+    state.runToken = "";
+    applyRunGuardState();
   }
 }
 
@@ -1932,7 +1989,13 @@ function init() {
   renderPipeline();
   resetProgress(1, "Idle");
   clearCurrentFinalOutput();
+  inputPayload();
   els.runWorkflow.addEventListener("click", handleRun);
+  if (els.runMode) {
+    els.runMode.addEventListener("change", () => {
+      inputPayload();
+    });
+  }
   if (els.workflowTab) els.workflowTab.addEventListener("click", () => setActiveView("workflow"));
   if (els.showcaseTab) els.showcaseTab.addEventListener("click", () => setActiveView("showcase"));
   if (els.saveExampleOutput) els.saveExampleOutput.addEventListener("click", saveCurrentRunAsExample);
@@ -1949,11 +2012,11 @@ function init() {
   }
 
   loadRuntimeConfig().then(async () => {
-    const loadedExample = await loadPremadeFromServer();
-    if (!loadedExample) {
-      await loadFallbackPremadeFromServer();
-    }
+    await loadPremadeFromServer();
   });
 }
 
 init();
+
+
+

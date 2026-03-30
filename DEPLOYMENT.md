@@ -12,7 +12,7 @@ Why this is the best fit for this repo:
 
 Recommended layout:
 - Railway web service running this Dockerfile
-- volume mounted for `/app/.runtime/final` and `/app/example-assets`
+- one persistent volume mounted at `/app/persist`
 - frontend served by the same Node process
 - DashScope + Kimi secrets configured as service environment variables
 
@@ -79,7 +79,7 @@ You do not strictly need Docker if you deploy to a VPS, but then you must manage
 2. Create a new Railway project from the repo.
 3. Let Railway build from `Dockerfile`.
 4. Add environment variables from `.env.example`.
-5. Add a persistent volume and mount it so `/app/.runtime/final` and `/app/example-assets` survive restarts.
+5. Add one persistent volume and mount it at `/app/persist`.
 6. Deploy.
 
 ## Production secrets
@@ -106,13 +106,12 @@ For production, put the same values into the host's environment-variable panel i
 ## Persistence expectations
 
 Persist these paths in production:
-- `/app/.runtime/final`
-- `/app/example-assets`
-- `/app/example-output.json`
+- `/app/persist`
 
 That gives you:
 - durable stitched final videos
 - durable example-output assets for the frontend demo tab
+- durable production run-cap state in `.runtime/run-guard.json`
 
 ## Operational defaults
 

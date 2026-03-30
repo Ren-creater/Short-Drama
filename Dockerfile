@@ -11,16 +11,16 @@ COPY server.js ./
 COPY app.js ./
 COPY index.html ./
 COPY styles.css ./
-COPY example-output.json ./
+COPY example-output.deploy.json ./example-output.json
+COPY example-assets ./example-assets
 COPY run_pipeline.js ./
-COPY showcase.html ./
-COPY showcase.js ./
 COPY plan.txt ./
 
-RUN mkdir -p /app/.runtime/final /app/example-assets
+RUN mkdir -p /app/persist/.runtime/final /app/persist/example-assets
 
 ENV PORT=3000 \
     HOST=0.0.0.0 \
+    PERSIST_ROOT=/app/persist \
     FFMPEG_PATH=/usr/bin/ffmpeg
 
 EXPOSE 3000

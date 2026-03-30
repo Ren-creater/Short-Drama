@@ -7,3 +7,4 @@ npm-debug.log*
 .runtime/cluster_tunnel.pid
 .runtime/cluster_web.pid
 .runtime/local_env.ps1
+example-assets/scene-*-video.mp4
